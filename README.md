@@ -1,4 +1,4 @@
-# LLM MCP GenPy (PyGen + Frontend)
+# SpiderGenAI  基于gemini的自动识别网站结构生成爬虫脚本agent
 
 ## 目录 (Table of Contents)
 
@@ -25,7 +25,7 @@
 
 这是一个**“智能生成爬虫脚本 + 执行 + 前端可视化”**的完整工程：
 
-- **后端**：`pygen/api.py`（FastAPI）负责启动任务、驱动浏览器抓包/分析、调用 LLM 生成脚本、运行脚本并汇总结果  
+- **后端**：`pygen/api.py`（FastAPI）负责启动任务、驱动浏览器抓包/分析、调用 LLM 生成脚本、运行脚本并汇总结果；llm生成的爬虫脚本代码页将保存在后端py文件夹下  
 - **前端**：`frontend/`（Vite + React + TS）负责表单配置、展示日志与结果
 - **浏览器自动化**：通过 **Chrome DevTools Protocol (CDP)** 连接到 Chrome，并用 Playwright 做页面交互与网络请求捕获
 
@@ -211,11 +211,11 @@ npm run dev
 - **说明**：填写 URL、日期范围、运行模式/爬取模式等基础配置。  
 - **Note**: Fill in URL, date range, run mode / crawl mode, etc.
 
-#### 2) 目录树选择 (Tree selection)
+#### 2) 自动识别网页目录树并选择 (Tree selection)
 
 ![目录树选择 - 多板块手动选择 / Tree selection - manual multi-category selection](pic/tree.gif)
 
-- **说明**：多板块爬取（手动）时，选择需要爬取的板块路径。  
+- **说明**：多板块爬取（手动）时，用户可以选择手动选取需要爬取的板块（或用自动探测模式给出截图后大模型自己判断需要爬取的板块）。  
 - **Note**: Select category paths when using manual multi-category crawling.
 
 #### 3) 企业报告下载 - 执行监控 (Enterprise report - execution)
