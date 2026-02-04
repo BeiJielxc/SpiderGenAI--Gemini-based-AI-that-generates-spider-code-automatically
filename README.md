@@ -1,4 +1,4 @@
-# SpiderGenAI
+# LLM MCP GenPy (PyGen + Frontend)
 
 ## 目录 (Table of Contents)
 
@@ -198,6 +198,39 @@ npm run dev
 
 - 企业/新闻报告：展示报告列表；多板块模式下会额外显示“来源板块”
 - 新闻舆情：展示文章列表与详情；多板块模式下同样显示“来源板块”
+
+### 界面截图 (UI screenshots)
+
+> 提示：以下为 `pic/` 目录内的 GIF 演示图，便于快速了解前端交互流程。  
+> Tip: The following GIFs are stored under `pic/` for a quick UI walkthrough.
+
+#### 1) 首页 (Homepage)
+
+![首页 - 配置表单与模式选择 / Homepage - configure form and modes](pic/homepage.gif)
+
+- **说明**：填写 URL、日期范围、运行模式/爬取模式等基础配置。  
+- **Note**: Fill in URL, date range, run mode / crawl mode, etc.
+
+#### 2) 目录树选择 (Tree selection)
+
+![目录树选择 - 多板块手动选择 / Tree selection - manual multi-category selection](pic/tree.gif)
+
+- **说明**：多板块爬取（手动）时，选择需要爬取的板块路径。  
+- **Note**: Select category paths when using manual multi-category crawling.
+
+#### 3) 企业报告下载 - 执行监控 (Enterprise report - execution)
+
+![企业报告下载 - 执行监控 / Enterprise report - execution monitor](pic/pdfdownload.gif)
+
+- **说明**：查看任务日志、进度与报告结果列表；可下载生成脚本/查看文件。  
+- **Note**: Monitor logs/progress and inspect report results; download the generated script/files.
+
+#### 4) 新闻舆情爬取 - 执行监控 (News sentiment - execution)
+
+![新闻舆情爬取 - 执行监控 / News sentiment - execution monitor](pic/newsdownload.gif)
+
+- **说明**：查看任务日志、进度与文章列表/详情；多板块时可标记来源板块。  
+- **Note**: Monitor logs/progress and inspect article list/details; categories are labeled in multi-category mode.
 
 ---
 
