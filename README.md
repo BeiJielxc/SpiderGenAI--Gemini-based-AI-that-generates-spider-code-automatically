@@ -1,4 +1,4 @@
-# SpiderGenAI  基于gemini的自动识别网站结构生成爬虫脚本的agent
+# SpiderGenAI  基于gemini的自动识别网站结构生成爬虫脚本agent
 
 ## 目录 (Table of Contents)
 
