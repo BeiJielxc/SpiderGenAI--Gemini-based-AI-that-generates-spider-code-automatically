@@ -1,4 +1,4 @@
-# LLM MCP GenPy (PyGen + Frontend)
+# SpiderGenAI
 
 ## 简介 (Overview)
 
