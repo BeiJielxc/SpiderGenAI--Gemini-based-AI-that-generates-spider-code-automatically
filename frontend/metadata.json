@@ -1,0 +1,5 @@
+{
+  "name": "Qwen Crawler Config Generator",
+  "description": "A clean and aesthetic interface for configuring crawler parameters based on Qwen code.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,16 @@
+# PyGen - 智能爬虫脚本生成器 依赖 (v2.0)
+
+# 核心依赖
+playwright>=1.40.0        # 浏览器自动化
+openai>=1.0.0             # LLM API客户端（兼容Qwen）
+pyyaml>=6.0               # 配置文件解析
+requests>=2.28.0          # HTTP请求
+pydantic>=2.0.0           # 数据验证（v2.0 新增）
+
+# 可选依赖（美化输出）
+rich>=13.0.0              # 终端美化
+
+# 生成的爬虫脚本可能需要的依赖（供参考）
+# beautifulsoup4>=4.11.0  # HTML解析
+# lxml>=4.9.0             # 快速XML/HTML解析器
+
