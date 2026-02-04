@@ -1,5 +1,26 @@
-# SpiderGenAI
+# LLM MCP GenPy (PyGen + Frontend)
 
+## 目录 (Table of Contents)
+
+- [简介 / Overview](#overview)
+- [功能 / Key features](#features)
+- [快速开始 / Quickstart](#quickstart)
+  - [后端依赖安装 / Backend install](#backend-install)
+  - [配置 config.yaml / Configure config.yaml](#configure-config)
+  - [启动/部署 Chrome + CDP / Chrome + CDP](#chrome-cdp)
+  - [启动后端 / Run backend](#run-backend)
+  - [启动前端 / Run frontend](#run-frontend)
+- [前端界面使用说明 / UI Guide](#ui-guide)
+- [输出位置 / Outputs](#outputs)
+- [项目架构与流程 / Architecture & Flow](#architecture-flow)
+- [方法与技术亮点 / Highlights](#highlights)
+- [目录结构与核心文件说明 / Structure & Key files](#structure-files)
+- [安全与 GitHub 提交建议 / Security checklist](#security)
+- [常见问题 / Troubleshooting](#troubleshooting)
+
+---
+
+<a id="overview"></a>
 ## 简介 (Overview)
 
 这是一个**“智能生成爬虫脚本 + 执行 + 前端可视化”**的完整工程：
@@ -16,6 +37,7 @@ This repo provides an end-to-end workflow:
 
 ---
 
+<a id="features"></a>
 ## 功能 (Key features)
 
 - **脚本生成**：基于页面结构/网络请求/额外需求，由 LLM 生成可独立运行的 Python 爬虫脚本  
@@ -27,6 +49,7 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 
 ---
 
+<a id="quickstart"></a>
 ## 快速开始 (Quickstart)
 
 ### 环境要求 (Prerequisites)
@@ -38,6 +61,7 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 
 ---
 
+<a id="backend-install"></a>
 ### 1) 后端依赖安装 (Backend install)
 
 在项目根目录执行：
@@ -53,6 +77,7 @@ python -m playwright install chromium
 
 ---
 
+<a id="configure-config"></a>
 ### 2) 配置 `config.yaml` (Configure `config.yaml`)
 
 本项目会优先读取：
@@ -86,6 +111,7 @@ Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。�
 
 ---
 
+<a id="chrome-cdp"></a>
 ### 3) 启动/部署 Chrome + CDP (Chrome + CDP)
 
 本项目默认会在后端启动任务时**自动启动 Chrome（CDP 模式）**，你通常不需要手工启动。
@@ -121,6 +147,7 @@ Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。�
 
 ---
 
+<a id="run-backend"></a>
 ### 4) 启动后端 (Run backend)
 
 在项目根目录执行：
@@ -134,6 +161,7 @@ python pygen\api.py
 
 ---
 
+<a id="run-frontend"></a>
 ### 5) 启动前端 (Run frontend)
 
 新开一个终端：
@@ -148,6 +176,7 @@ npm run dev
 
 ---
 
+<a id="ui-guide"></a>
 ## 前端界面使用说明 (UI Guide)
 
 ### 基本流程 (Basic flow)
@@ -172,6 +201,7 @@ npm run dev
 
 ---
 
+<a id="outputs"></a>
 ## 输出位置 (Outputs)
 
 > 运行时会产生大量输出文件，建议不要提交到 GitHub。
@@ -182,6 +212,7 @@ npm run dev
 
 ---
 
+<a id="architecture-flow"></a>
 ## 项目架构与流程 (Architecture & Flow)
 
 ### 端到端流程 (End-to-end)
@@ -205,6 +236,7 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 
 ---
 
+<a id="highlights"></a>
 ## 方法与技术亮点 (Highlights)
 
 - **CDP + Playwright**：用真实浏览器网络栈抓包，适配 SPA/API 型站点  
@@ -214,6 +246,7 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 
 ---
 
+<a id="structure-files"></a>
 ## 目录结构与核心文件说明 (Structure & Key files)
 
 > 说明 / Note  
@@ -268,6 +301,7 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 
 ---
 
+<a id="security"></a>
 ## 安全与 GitHub 提交建议 (Security checklist)
 
 建议在 `.gitignore` 排除（示例）：
@@ -280,6 +314,7 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 
 ---
 
+<a id="troubleshooting"></a>
 ## 常见问题 (Troubleshooting)
 
 - **Chrome 找不到/启动失败**：确认已安装 Google Chrome；或使用“手动启动 CDP”方式启动后再运行后端  
