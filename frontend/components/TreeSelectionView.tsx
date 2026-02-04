@@ -218,6 +218,7 @@ const TreeSelectionView: React.FC<TreeSelectionViewProps> = ({ url, formData, on
         extraRequirements: formData.extraRequirements,
         siteName: formData.siteName,
         listPageName: formData.listPageName,
+        sourceCredibility: formData.sourceCredibility || undefined,
         runMode: formData.runMode,
         crawlMode: formData.crawlMode,
         // 关键：TreeSelectionView 之前没有传 downloadReport，后端会使用默认值 "yes" 导致即使用户选了不下载仍会下载

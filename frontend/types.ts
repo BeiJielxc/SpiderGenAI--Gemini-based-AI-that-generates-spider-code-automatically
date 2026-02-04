@@ -13,6 +13,7 @@ export interface CrawlerFormData {
   extraRequirements: string;
   siteName: string;
   listPageName: string;
+  sourceCredibility: string; // 信息源可信度（T1/T2/T3）
   reportUrl: string;
   outputScriptName: string;
   runMode: string;
@@ -95,6 +96,7 @@ export interface GenerateRequest {
   extraRequirements?: string;
   siteName?: string;
   listPageName?: string;
+  sourceCredibility?: string; // 信息源可信度（T1/T2/T3）
   runMode: string;
   crawlMode: string;
   downloadReport?: string;

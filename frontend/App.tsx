@@ -8,7 +8,8 @@ import {
   Bot,
   Settings2,
   Layers,
-  FileDown
+  FileDown,
+  ShieldCheck
 } from 'lucide-react';
 import FormInput from './components/FormInput';
 import RichInput from './components/RichInput';
@@ -26,8 +27,9 @@ const App: React.FC = () => {
     extraRequirements: '',
     siteName: '',
     listPageName: '',
+    sourceCredibility: '',
     reportUrl: '',
-    outputScriptName: 'crawler.py',
+    outputScriptName: '',
     runMode: '',
     crawlMode: '',
     downloadReport: '',
@@ -93,6 +95,11 @@ const App: React.FC = () => {
 
     if (!formData.reportUrl) {
       alert('请输入报告页面链接');
+      return;
+    }
+
+    if (!formData.outputScriptName || !formData.outputScriptName.trim()) {
+      alert('请输入输出脚本名称');
       return;
     }
 
@@ -248,26 +255,41 @@ const App: React.FC = () => {
                     className="md:col-span-2"
                   />
 
-                  {/* Row 3: 站点信息 */}
-                  <FormInput
-                    label="官网名称"
-                    name="siteName"
-                    type="text"
-                    placeholder="例如：中诚信国际"
-                    value={formData.siteName}
-                    onChange={handleChange}
-                    icon={<Globe size={18} />}
-                  />
-                  
-                  <FormInput
-                    label="列表页面名称"
-                    name="listPageName"
-                    type="text"
-                    placeholder="例如：中诚信国际-评级结果发布"
-                    value={formData.listPageName}
-                    onChange={handleChange}
-                    icon={<LayoutList size={18} />}
-                  />
+                  {/* Row 3: 站点信息（3列） */}
+                  <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-8">
+                    <FormInput
+                      label="官网名称"
+                      name="siteName"
+                      type="text"
+                      placeholder="例如：中诚信国际"
+                      value={formData.siteName}
+                      onChange={handleChange}
+                      icon={<Globe size={18} />}
+                    />
+                    
+                    <FormInput
+                      label="列表页面名称"
+                      name="listPageName"
+                      type="text"
+                      placeholder="例如：中诚信国际-评级结果发布"
+                      value={formData.listPageName}
+                      onChange={handleChange}
+                      icon={<LayoutList size={18} />}
+                    />
+
+                    <SelectInput
+                      label="信息源可信度"
+                      name="sourceCredibility"
+                      value={formData.sourceCredibility}
+                      onChange={handleChange}
+                      icon={<ShieldCheck size={18} />}
+                      options={[
+                        { value: 'T1', label: 'T1' },
+                        { value: 'T2', label: 'T2' },
+                        { value: 'T3', label: 'T3' }
+                      ]}
+                    />
+                  </div>
 
                   {/* Row 4: URL（必填） */}
                   <FormInput
@@ -285,7 +307,7 @@ const App: React.FC = () => {
 
                   {/* Row 5: 输出脚本名称 */}
                   <FormInput
-                    label="输出脚本名称"
+                    label="输出脚本名称 *"
                     name="outputScriptName"
                     type="text"
                     placeholder="例如：test.py"

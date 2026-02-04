@@ -137,6 +137,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
         extraRequirements: formData.extraRequirements,
         siteName: formData.siteName,
         listPageName: formData.listPageName,
+        sourceCredibility: formData.sourceCredibility || undefined,
         runMode: formData.runMode,
         crawlMode: formData.crawlMode,
         downloadReport: formData.downloadReport,
