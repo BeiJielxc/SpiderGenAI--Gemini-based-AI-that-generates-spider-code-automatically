@@ -237,7 +237,7 @@ const App: React.FC = () => {
 
                   {/* Row 2: 额外需求 */}
                   <RichInput
-                    label="额外需求"
+                    label="额外需求（可直接粘贴图片或从本机上传图片/文件）"
                     name="extraRequirements"
                     placeholder="请输入任何额外的处理逻辑或需求..."
                     value={formData.extraRequirements}
