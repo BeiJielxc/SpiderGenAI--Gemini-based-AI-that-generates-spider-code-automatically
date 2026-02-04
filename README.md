@@ -211,11 +211,11 @@ npm run dev
 - **说明**：填写 URL、日期范围、运行模式/爬取模式等基础配置。  
 - **Note**: Fill in URL, date range, run mode / crawl mode, etc.
 
-#### 2) 目录树选择 (Tree selection)
+#### 2) 自动识别网页目录树并选择 (Tree selection)
 
 ![目录树选择 - 多板块手动选择 / Tree selection - manual multi-category selection](pic/tree.gif)
 
-- **说明**：多板块爬取（手动）时，选择需要爬取的板块路径。  
+- **说明**：多板块爬取（手动）时，用户可以选择手动选取需要爬取的板块（或用自动探测模式给出截图后大模型自己判断需要爬取的板块）。  
 - **Note**: Select category paths when using manual multi-category crawling.
 
 #### 3) 企业报告下载 - 执行监控 (Enterprise report - execution)
