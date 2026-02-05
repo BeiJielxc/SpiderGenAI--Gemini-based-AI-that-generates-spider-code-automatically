@@ -54,10 +54,10 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 
 ### 环境要求 (Prerequisites)
 
-- **Windows 10/11**（其他系统理论可用，但本文以 Windows 为主）  
+- **Windows 10/11 / macOS**（本文以 Windows 为主，同时补充 macOS 指令）  
 - **Python**：建议 3.10+  
 - **Node.js**：建议 18+ / 20+  
-- **Google Chrome**：已安装（后端会自动寻找 `chrome.exe` 并启动 CDP）
+- **Google Chrome**：已安装（后端会自动寻找 Chrome 并启动 CDP）
 
 ---
 
@@ -70,6 +70,15 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r pygen\requirements.txt
+python -m playwright install chromium
+```
+
+macOS / Linux（bash / zsh）对应指令：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r pygen/requirements.txt
 python -m playwright install chromium
 ```
 
@@ -107,6 +116,8 @@ cdp:
   timeout: 60
 ```
 
+> macOS 提示：`cdp.user_data_dir` 建议使用类似 `"/Users/<you>/llm_mcp_genpy_runtime/chrome-profile"` 或 `"$HOME/llm_mcp_genpy_runtime/chrome-profile"`（YAML 中可直接写绝对路径字符串）。
+
 Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。建议只提交模板文件（如 `config_copy.yaml` 或你自己的 `config.yaml.example`）。
 
 ---
@@ -135,6 +146,15 @@ Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。�
   --no-first-run --no-default-browser-check
 ```
 
+macOS 下可执行（注意应用路径中包含空格）：
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/llm_mcp_genpy_runtime/chrome-profile" \
+  --no-first-run --no-default-browser-check
+```
+
 然后启动后端即可复用该实例。
 
 #### 登录态说明 (Login persistence)
@@ -153,7 +173,11 @@ Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。�
 在项目根目录执行：
 
 ```bash
+# Windows
 python pygen\api.py
+
+# macOS / Linux
+python pygen/api.py
 ```
 
 - API 文档：`http://localhost:8000/docs`

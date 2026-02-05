@@ -7,10 +7,19 @@ pyyaml>=6.0               # 配置文件解析
 requests>=2.28.0          # HTTP请求
 pydantic>=2.0.0           # 数据验证（v2.0 新增）
 
+# Web 后端（FastAPI 服务）
+fastapi                   # API 服务框架（pygen/api.py）
+uvicorn                   # ASGI Server（pygen/api.py）
+
+# 下载/网络增强（后端下载 PDF 等用到）
+httpx                     # 异步 HTTP 客户端（pygen/api.py）
+
+# HTML 解析（LLM agent / 错误案例等模块硬依赖）
+beautifulsoup4            # HTML 解析（pygen/llm_agent.py 等）
+
 # 可选依赖（美化输出）
 rich>=13.0.0              # 终端美化
 
 # 生成的爬虫脚本可能需要的依赖（供参考）
-# beautifulsoup4>=4.11.0  # HTML解析
 # lxml>=4.9.0             # 快速XML/HTML解析器
 
