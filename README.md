@@ -56,7 +56,7 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 
 ### 环境要求 (Prerequisites)
 
-- **Windows 10/11 / macOS**（本文以 Windows 为主，同时补充 macOS 指令）  
+- **Windows 10/11 / macOS** 
 - **Python**：建议 3.10+  
 - **Node.js**：建议 18+ / 20+  
 - **Google Chrome**：已安装（后端会自动寻找 Chrome 并启动 CDP）
