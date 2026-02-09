@@ -92,6 +92,10 @@ cdp:
   auto_select_port: true  # 端口被占用时自动选择其他端口
   user_data_dir: "YOUR_chrome_profile_dir"  # Chrome Profile目录（保存登录态等）
   timeout: 60  # 操作超时时间（秒）
+  # 浏览器无头模式开关（全局控制所有爬取模式下的浏览器是否显示窗口）
+  # - false（默认）：显示浏览器窗口，方便本地开发调试
+  # - true：无头模式，不显示浏览器窗口（Linux 服务器部署必须设为 true）
+  headless: true
 
 # 搜索配置
 search:

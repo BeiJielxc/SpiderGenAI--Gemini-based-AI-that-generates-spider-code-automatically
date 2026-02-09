@@ -1464,6 +1464,10 @@ def extract_dates_from_rendered_list(page_url: str, item_selector: str, date_sel
 {
   "total": 45,
   "crawlTime": "2026-01-27 15:30:00",
+  "downloadHeaders": {
+    "User-Agent": "Mozilla/5.0 ...",
+    "Referer": "https://目标网站的页面URL/"
+  },
   "reports": [
     {
       "id": "1",
@@ -1476,14 +1480,26 @@ def extract_dates_from_rendered_list(page_url: str, item_selector: str, date_sel
 }
 ```
 
+**重要：`downloadHeaders` 字段是必须的**，用于后续下载 PDF/附件时绕过防盗链（403 Forbidden）。
+- `Referer` 应设为爬取的目标页面 URL（不是下载链接本身的域名）
+- `User-Agent` 应模拟真实浏览器
+
 ### 代码中必须包含的保存逻辑
 
 ```python
-def save_results(reports: list, output_path: str):
-    # 保存爬取结果为JSON
+def save_results(reports: list, output_path: str, target_url: str = ""):
+    # 构建下载头信息（供后续下载 PDF/附件时使用，绕过防盗链 403）
+    from urllib.parse import urlsplit
+    _p = urlsplit(target_url)
+    _origin = "{}://{}".format(_p.scheme or "https", _p.netloc)
+    download_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": target_url or _origin + "/",
+    }
     result = {
         "total": len(reports),
         "crawlTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "downloadHeaders": download_headers,
         "reports": reports
     }
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -2361,9 +2377,19 @@ def save_results(data: list, output_dir: str = "."):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = os.path.join(output_dir, f"crawl_result_{{timestamp}}.json")
     
+    # 构建下载头信息（供后续下载 PDF/附件时使用，绕过防盗链 403）
+    from urllib.parse import urlsplit
+    _p = urlsplit(BASE_URL)
+    _origin = "{{}}://{{}}".format(_p.scheme or "https", _p.netloc)
+    download_headers = {{
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": BASE_URL or _origin + "/",
+    }}
+    
     result = {{
         "total": len(data),
         "crawlTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "downloadHeaders": download_headers,
         "reports": data
     }}
     

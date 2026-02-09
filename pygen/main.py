@@ -489,11 +489,11 @@ async def run_generation(
         launcher = ChromeLauncher(
             debug_port=config.cdp_debug_port,
             user_data_dir=config.cdp_user_data_dir,
-            headless=False,
+            headless=config.browser_headless,
             auto_select_port=config.cdp_auto_select_port
         )
         launcher.launch()
-        console.print("[green]✓ Chrome启动成功[/green]")
+        console.print(f"[green]✓ Chrome启动成功 (headless={config.browser_headless})[/green]")
 
         # 2. 连接浏览器
         console.print("\n[yellow]🔗 正在连接浏览器...[/yellow]")

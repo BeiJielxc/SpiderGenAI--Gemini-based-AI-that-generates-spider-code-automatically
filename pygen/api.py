@@ -52,8 +52,9 @@ class GenerateRequest(BaseModel):
     extraRequirements: Optional[str] = ""
     siteName: Optional[str] = ""
     listPageName: Optional[str] = ""
+    sourceCredibility: Optional[str] = ""  # 信息源可信度（T1/T2/T3）
     runMode: str  # 'enterprise_report' | 'news_sentiment'
-    crawlMode: str  # 'single_page' | 'multi_page' | 'auto_detect'
+    crawlMode: str  # 'single_page' | 'multi_page' | 'auto_detect' | 'date_range_api'
     downloadReport: Optional[str] = "yes"  # 'yes' | 'no'
     selectedPaths: Optional[List[str]] = None  # 用户选中的目录路径（仅 multi_page 模式）
     attachments: Optional[List[AttachmentData]] = None  # 图片/文件附件
@@ -184,11 +185,12 @@ async def _fetch_menu_tree(url: str) -> Dict[str, Any]:
         import random
         random_port = random.randint(10000, 20000)
         
-        # 启动 Chrome
+        # 启动 Chrome（headless 模式由 config.yaml 统一控制）
+        _headless = config.browser_headless if config else False
         launcher = ChromeLauncher(
             debug_port=random_port,
             user_data_dir=None,  # 让 Launcher 自动创建临时目录，避免 Profile 锁冲突
-            headless=False,
+            headless=_headless,
             auto_select_port=True
         )
         launcher.launch()
@@ -254,14 +256,16 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         # 随机选择一个端口范围，避免与常用端口冲突
         random_port = random.randint(10000, 20000)
         
+        # headless 模式由 config.yaml 统一控制
+        _headless = config.browser_headless if config else False
         launcher = ChromeLauncher(
             debug_port=random_port,
             user_data_dir=None, # 让 Launcher 自动创建临时目录，避免 Profile 锁冲突
-            headless=False,
+            headless=_headless,
             auto_select_port=True
         )
         launcher.launch()
-        _add_log(task_id, f"[SUCCESS] Chrome 启动成功 (端口 {launcher.actual_port})")
+        _add_log(task_id, f"[SUCCESS] Chrome 启动成功 (端口 {launcher.actual_port}, headless={_headless})")
         
         # 存储浏览器资源引用，以便停止时可以关闭
         task_browsers[task_id] = {"launcher": launcher, "browser": None}
@@ -453,6 +457,128 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
                 f"[SUCCESS] 智能探测完成，构建分类映射: "
                 f"{len((verified_mapping or {}).get('menu_to_filters', {})) + len((verified_mapping or {}).get('menu_to_urls', {}))} 个"
             )
+        
+        elif request.crawlMode == "date_range_api":
+            # 日期筛选类网站爬取模式：三层策略
+            # 第一层：纯 API 直连
+            # 第二层：DOM 特征检测 + 自动操作日期控件
+            # 第三层：截图 + LLM 视觉分析
+            _update_step(task_id, 5, "正在分析日期 API（三层策略）")
+            _add_log(task_id, "[INFO] 日期筛选模式：启动三层策略...")
+            _add_log(task_id, "[INFO]   第一层: 纯 API 直连")
+            _add_log(task_id, "[INFO]   第二层: DOM 特征检测 + 自动操作")
+            _add_log(task_id, "[INFO]   第三层: 截图 + LLM 视觉分析")
+            
+            # 导入日期 API 提取器
+            from date_api_extractor import DateAPIExtractor, extract_date_api_with_three_layers
+            
+            # 准备 LLM 实例（用于第三层）
+            temp_llm = LLMAgent(
+                api_key=config.qwen_api_key if config else "",
+                model=config.qwen_model if config else "qwen-max",
+                base_url=config.qwen_base_url if config else None,
+                enable_auto_repair=False
+            )
+            
+            # 日志回调
+            def log_callback(msg: str):
+                _add_log(task_id, f"[DATE-API] {msg}")
+            
+            # 执行三层策略
+            extractor = DateAPIExtractor(browser, temp_llm)
+            date_api_result = await extractor.extract_with_three_layers(
+                network_requests,
+                request.startDate,
+                request.endDate,
+                log_callback=log_callback
+            )
+            
+            if date_api_result.success and date_api_result.best_candidate:
+                # 某一层成功
+                candidate = date_api_result.best_candidate
+                layer_name = {1: "纯 API 直连", 2: "DOM 自动操作", 3: "LLM 视觉分析"}.get(date_api_result.layer, "未知")
+                
+                _add_log(task_id, f"[SUCCESS] 第 {date_api_result.layer} 层（{layer_name}）成功！")
+                _add_log(task_id, f"[SUCCESS] 识别到日期 API: {candidate.url[:80]}...")
+                _add_log(task_id, f"[SUCCESS] 日期参数: {list(candidate.date_params.keys())}")
+                _add_log(task_id, f"[SUCCESS] 参数格式: {list(candidate.date_params.values())}")
+                _add_log(task_id, f"[SUCCESS] 验证通过，获取到 {date_api_result.data_count} 条数据")
+                
+                # 生成代码片段供 LLM 参考
+                api_code_snippet = extractor.generate_api_code_snippet(
+                    candidate, 
+                    request.startDate, 
+                    request.endDate
+                )
+                
+                # 构建分析结果
+                enhanced_analysis = {
+                    "date_api_extraction": {
+                        "success": True,
+                        "layer": date_api_result.layer,
+                        "layer_name": layer_name,
+                        "api_url": candidate.url,
+                        "method": candidate.method,
+                        "base_params": candidate.params,
+                        "date_params": candidate.date_params,
+                        "data_count": date_api_result.data_count,
+                        "code_snippet": api_code_snippet,
+                        "replayed_url": extractor.build_replay_url(
+                            candidate, request.startDate, request.endDate
+                        )[0],
+                        "replayed_data": date_api_result.replayed_data,
+                    },
+                    "recommendations": date_api_result.recommendations,
+                    "mode": f"date_range_api_layer{date_api_result.layer}"
+                }
+                
+                _add_log(task_id, f"[SUCCESS] 将生成直接调用 API 的脚本（基于第 {date_api_result.layer} 层结果）")
+                
+            else:
+                # 三层全部失败
+                _add_log(task_id, f"[ERROR] 三层策略均失败")
+                
+                # 输出各层失败原因
+                if date_api_result.layer1_result:
+                    _add_log(task_id, f"[INFO] 第一层失败: {date_api_result.layer1_result.get('error', '未知')}")
+                if date_api_result.layer2_result:
+                    _add_log(task_id, f"[INFO] 第二层失败: {date_api_result.layer2_result.get('error', '未知')}")
+                if date_api_result.layer3_result:
+                    _add_log(task_id, f"[INFO] 第三层失败: {date_api_result.layer3_result.get('error', '未知')}")
+                
+                # 列出发现的候选 API（供调试）
+                if date_api_result.candidates:
+                    _add_log(task_id, f"[INFO] 发现 {len(date_api_result.candidates)} 个候选 API:")
+                    for i, c in enumerate(date_api_result.candidates[:3]):
+                        _add_log(task_id, f"[INFO]   {i+1}. {c.url[:60]}... (置信度: {c.confidence:.2f})")
+                
+                # 构建分析结果（标记失败，但仍提供候选信息）
+                enhanced_analysis = {
+                    "date_api_extraction": {
+                        "success": False,
+                        "layer": 0,
+                        "error": date_api_result.error,
+                        "layer1_error": (date_api_result.layer1_result or {}).get("error"),
+                        "layer2_error": (date_api_result.layer2_result or {}).get("error"),
+                        "layer3_error": (date_api_result.layer3_result or {}).get("error"),
+                        "candidates_count": len(date_api_result.candidates),
+                        "candidates": [
+                            {
+                                "url": c.url,
+                                "method": c.method,
+                                "date_params": c.date_params,
+                                "confidence": c.confidence,
+                                "verification_error": c.verification_result.get("error") if c.verification_result else None
+                            }
+                            for c in date_api_result.candidates[:5]
+                        ]
+                    },
+                    "recommendations": date_api_result.recommendations,
+                    "mode": "date_range_api_all_failed"
+                }
+                
+                _add_log(task_id, "[WARNING] 三层策略均失败，将尝试生成通用爬虫脚本")
+        
         else:
             # 单页模式：基础分析，跳过步骤 5
             _add_log(task_id, "[INFO] 单页模式：使用基础分析")
@@ -461,66 +587,166 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         # Step 7: 调用 LLM 生成脚本
         if _is_cancelled(task_id):
             raise RuntimeError("任务已被用户取消")
+
+        # ========== date_range_api：确定性模板优先（成功时跳过 LLM，避免跑偏） ==========
+        script_code = None
+        if request.crawlMode == "date_range_api":
+            dae = (enhanced_analysis or {}).get("date_api_extraction", {}) if isinstance(enhanced_analysis, dict) else {}
+            if isinstance(dae, dict) and dae.get("success") is True:
+                _update_step(task_id, 6, "正在生成确定性 API 直连脚本（跳过LLM）")
+                _add_log(task_id, "[INFO] date_range_api：已验证可用 API，使用确定性模板生成脚本（不调用 LLM）")
+                try:
+                    from deterministic_templates import render_date_range_api_script, analyze_response_schema, build_llm_cloze_prompt, parse_llm_cloze_response
+                    
+                    # ── 自动推断字段映射 ──
+                    field_mappings = None
+                    sample_data = dae.get("replayed_data")
+                    if sample_data and isinstance(sample_data, dict):
+                        field_mappings = analyze_response_schema(sample_data, api_url=str(dae.get("api_url", "")))
+                        _add_log(task_id, f"[INFO] 字段映射自动推断: 置信度={field_mappings.get('confidence', 0):.0%}, "
+                                          f"日期={field_mappings.get('date_fields', [])}, "
+                                          f"标题={field_mappings.get('title_fields', [])}, "
+                                          f"URL={field_mappings.get('url_fields', [])}")
+                        
+                        # 如果有未映射的字段类别 → LLM 完形填空补全
+                        unmapped = field_mappings.get("unmapped", [])
+                        if unmapped and sample_data:
+                            _add_log(task_id, f"[INFO] 字段映射不完整 ({unmapped})，尝试 LLM 完形填空...")
+                            try:
+                                items_for_llm = []
+                                for k in ["data", "result", "list", "items", "rows"]:
+                                    v = sample_data.get(k)
+                                    if isinstance(v, list) and v:
+                                        if isinstance(v[0], dict):
+                                            items_for_llm = v[:1]
+                                        elif isinstance(v[0], list) and v[0] and isinstance(v[0][0], dict):
+                                            items_for_llm = v[0][:1]
+                                        break
+                                if isinstance(sample_data.get("pageHelp"), dict):
+                                    ph_data = sample_data["pageHelp"].get("data", [])
+                                    if ph_data:
+                                        if isinstance(ph_data[0], dict):
+                                            items_for_llm = ph_data[:1]
+                                        elif isinstance(ph_data[0], list) and ph_data[0]:
+                                            items_for_llm = [x for x in ph_data[0] if isinstance(x, dict)][:1]
+                                
+                                if items_for_llm:
+                                    cloze_prompt = build_llm_cloze_prompt(items_for_llm[0], unmapped)
+                                    llm_for_cloze = LLMAgent(
+                                        api_key=config.qwen_api_key if config else "",
+                                        model=config.qwen_model if config else "qwen-max",
+                                        base_url=config.qwen_base_url if config else None,
+                                        enable_auto_repair=False
+                                    )
+                                    cloze_resp = llm_for_cloze._call_llm(
+                                        system_prompt="You are a JSON field mapping assistant. Only output valid JSON.",
+                                        user_prompt=cloze_prompt,
+                                        temperature=0.1
+                                    )
+                                    cloze_result = parse_llm_cloze_response(cloze_resp)
+                                    if cloze_result:
+                                        for field_type, field_names in cloze_result.items():
+                                            if field_names and field_type in field_mappings:
+                                                field_mappings[field_type] = field_names
+                                        still_unmapped = [u for u in unmapped if not cloze_result.get(u)]
+                                        field_mappings["unmapped"] = still_unmapped
+                                        _add_log(task_id, f"[SUCCESS] LLM 完形填空补全: {cloze_result}")
+                            except Exception as cloze_err:
+                                _add_log(task_id, f"[WARNING] LLM 完形填空失败（不影响生成）: {cloze_err}")
+                    
+                    script_code = render_date_range_api_script(
+                        target_url=request.url,
+                        api_url=str(dae.get("api_url", "")),
+                        method=str(dae.get("method", "GET")),
+                        base_params=dae.get("base_params", {}) or {},
+                        date_params=dae.get("date_params", {}) or {},
+                        start_date=request.startDate,
+                        end_date=request.endDate,
+                        output_dir=str((Path(__file__).parent / "output")),
+                        extra_headers={},
+                        field_mappings=field_mappings,
+                    )
+                    _add_log(task_id, "[SUCCESS] 已生成确定性 API 脚本（纯接口直连）")
+                except Exception as tpl_err:
+                    _add_log(task_id, f"[WARNING] 确定性模板生成失败，将回退到 LLM: {tpl_err}")
+                    script_code = None
             
-        _update_step(task_id, 6, "正在调用LLM生成爬虫脚本")
-        _add_log(task_id, f"[INFO] 正在调用 LLM: {config.qwen_model if config else 'unknown'}")
-        _add_log(task_id, "[INFO] 这可能需要 20-60 秒，请耐心等待...")
-        _add_log(task_id, f"[INFO] 自动修复/检查/后处理: {'开启' if auto_repair_enabled else '关闭'}")
-        
-        llm = LLMAgent(
-            api_key=config.qwen_api_key if config else "",
-            model=config.qwen_model if config else "qwen-max",
-            base_url=config.qwen_base_url if config else None,
-            enable_auto_repair=auto_repair_enabled
-        )
-        
-        # 构建用户需求
-        user_requirements = request.extraRequirements or ""
-        if request.siteName:
-            user_requirements += f"\n官网名称: {request.siteName}"
-        if request.listPageName:
-            user_requirements += f"\n列表页面名称: {request.listPageName}"
-        
-        # 准备附件（图片）
-        llm_attachments = None
-        if request.attachments:
-            from llm_agent import AttachmentData
-            llm_attachments = [
-                AttachmentData(
-                    filename=att.filename,
-                    base64_data=att.base64,
-                    mime_type=att.mimeType
-                )
-                for att in request.attachments
-            ]
-            _add_log(task_id, f"[INFO] 已附加 {len(llm_attachments)} 个图片/文件给 LLM")
-        
-        try:
-            script_code = llm.generate_crawler_script(
-                page_url=request.url,
-                page_html=page_html,
-                page_structure=page_structure,
-                network_requests=network_requests,
-                user_requirements=user_requirements if user_requirements.strip() else None,
-                start_date=request.startDate,
-                end_date=request.endDate,
-                enhanced_analysis=enhanced_analysis,
-                attachments=llm_attachments,
-                run_mode=request.runMode,
-                task_id=task_id
+        # ========== 其他模式 / 或模板失败：走 LLM 生成 ==========
+        if script_code is None:
+            _update_step(task_id, 6, "正在调用LLM生成爬虫脚本")
+            _add_log(task_id, f"[INFO] 正在调用 LLM: {config.qwen_model if config else 'unknown'}")
+            _add_log(task_id, "[INFO] 这可能需要 20-60 秒，请耐心等待...")
+            _add_log(task_id, f"[INFO] 自动修复/检查/后处理: {'开启' if auto_repair_enabled else '关闭'}")
+            
+            llm = LLMAgent(
+                api_key=config.qwen_api_key if config else "",
+                model=config.qwen_model if config else "qwen-max",
+                base_url=config.qwen_base_url if config else None,
+                enable_auto_repair=auto_repair_enabled
             )
+            # 构建用户需求
+            user_requirements = request.extraRequirements or ""
+            if request.siteName:
+                user_requirements += f"\n官网名称: {request.siteName}"
+            if request.listPageName:
+                user_requirements += f"\n列表页面名称: {request.listPageName}"
+            if request.sourceCredibility:
+                user_requirements += f"\n信息源可信度: {request.sourceCredibility}"
             
-            # 检查是否是 fallback 脚本（LLM 调用失败）
-            if "fallback template" in script_code.lower() or "generated when LLM fails" in script_code.lower():
-                _add_log(task_id, "[ERROR] LLM 调用失败，已使用备用模板脚本")
-                raise RuntimeError("LLM 调用失败，无法生成有效脚本。请检查网络连接或 API 配置。")
-        except Exception as llm_err:
-            error_msg = str(llm_err)
-            _add_log(task_id, f"[ERROR] LLM 生成脚本失败: {error_msg}")
-            # 如果错误信息中包含代理错误，给出更明确的提示
-            if "ProxyError" in error_msg or "proxy" in error_msg.lower():
-                error_msg = "LLM API 连接失败（代理错误）。请检查网络代理设置或 VPN 配置。"
-            raise RuntimeError(error_msg)
+            # 准备附件（图片）
+            llm_attachments = None
+            if request.attachments:
+                from llm_agent import AttachmentData
+                llm_attachments = [
+                    AttachmentData(
+                        filename=att.filename,
+                        base64_data=att.base64,
+                        mime_type=att.mimeType
+                    )
+                    for att in request.attachments
+                ]
+                _add_log(task_id, f"[INFO] 已附加 {len(llm_attachments)} 个图片/文件给 LLM")
+            
+            try:
+                script_code = llm.generate_crawler_script(
+                    page_url=request.url,
+                    page_html=page_html,
+                    page_structure=page_structure,
+                    network_requests=network_requests,
+                    user_requirements=user_requirements if user_requirements.strip() else None,
+                    start_date=request.startDate,
+                    end_date=request.endDate,
+                    enhanced_analysis=enhanced_analysis,
+                    attachments=llm_attachments,
+                    run_mode=request.runMode,
+                    task_id=task_id
+                )
+                
+                # 检查是否是 fallback 脚本（LLM 调用失败）
+                if (
+                    isinstance(script_code, str)
+                    and ("fallback template" in script_code.lower() or "generated when llm fails" in script_code.lower())
+                ):
+                    _add_log(task_id, "[ERROR] LLM 调用失败，已使用备用模板脚本")
+                    raise RuntimeError("LLM 调用失败，无法生成有效脚本。请检查网络连接或 API 配置。")
+            except Exception as llm_err:
+                error_msg = str(llm_err)
+                _add_log(task_id, f"[ERROR] LLM 生成脚本失败: {error_msg}")
+                # 如果错误信息中包含代理错误，给出更明确的提示
+                if "ProxyError" in error_msg or "proxy" in error_msg.lower():
+                    error_msg = "LLM API 连接失败（代理错误）。请检查网络代理设置或 VPN 配置。"
+                raise RuntimeError(error_msg)
+            
+            token_usage = llm.get_token_usage()
+            _add_log(task_id, f"[SUCCESS] LLM 生成完成，Token: {token_usage['total_tokens']:,}")
+        else:
+            # 确定性模板：不调用 LLM
+            _add_log(task_id, "[SUCCESS] 已跳过 LLM：使用确定性模板生成脚本")
+        
+        # 兜底：确保 script_code 是字符串
+        if not isinstance(script_code, str) or not script_code.strip():
+            _add_log(task_id, "[ERROR] 脚本生成失败：script_code 为空或非字符串")
+            raise RuntimeError("脚本生成失败：script_code 为空或非字符串")
         
         # 【关键】后处理：注入正确的分类映射（multi_page / auto_detect 且有可信映射时）
         # 注意：这是数据正确性的保障，必须始终执行，不受 auto_repair 开关影响
@@ -539,9 +765,6 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         
         # 注意：HTTP 韧性层、日期提取工具等后处理已移至 llm_agent.py 中的条件性后处理
         # 这里不再需要单独调用
-        
-        token_usage = llm.get_token_usage()
-        _add_log(task_id, f"[SUCCESS] LLM 生成完成，Token: {token_usage['total_tokens']:,}")
         
         # Step 8: 验证生成的代码
         if _is_cancelled(task_id):
@@ -795,6 +1018,9 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
                         with open(latest_json, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                         
+                        # 提取生成脚本输出的下载头（如有），供后续下载 PDF 时使用
+                        _script_download_headers = data.get("downloadHeaders") if isinstance(data, dict) else None
+                        
                         # 解析 reports 数组（兼容不同脚本字段命名：name/title/reportName/text）
                         if isinstance(data, dict) and "reports" in data:
                             for i, item in enumerate(data["reports"]):
@@ -878,6 +1104,9 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         downloaded_count = 0
         files_not_enough = False
         pdf_output_dir = None
+        # 确保 _script_download_headers 已定义（LLM 生成的脚本可能没有此字段）
+        if '_script_download_headers' not in dir():
+            _script_download_headers = None
         
         if request.runMode in ["enterprise_report", "news_report_download"] and request.downloadReport == "yes" and len(reports) > 0:
             _add_log(task_id, "[INFO] 正在下载前5个PDF文件...")
@@ -905,6 +1134,21 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             
             import httpx
             import urllib.parse
+            from urllib.parse import urlparse as _dl_urlparse
+            
+            # ── 构建防盗链请求头（泛化：从目标页面 URL 自动派生 Referer）──
+            # 优先使用生成脚本输出的 downloadHeaders（更精准），否则从 request.url 派生
+            _target_parsed = _dl_urlparse(request.url)
+            _target_origin = f"{_target_parsed.scheme}://{_target_parsed.netloc}"
+            _download_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/pdf, application/octet-stream, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": request.url,  # 用爬取的目标页面作为 Referer（最自然）
+            }
+            # 合并脚本输出的下载头（如果有），脚本头优先
+            if _script_download_headers and isinstance(_script_download_headers, dict):
+                _download_headers.update(_script_download_headers)
             
             downloaded_reports = []
             
@@ -927,22 +1171,47 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
                     filename = f"{i+1}_{safe_name}.{file_ext}"
                     local_path = pdf_output_dir / filename
                     
-                    # 下载文件
+                    # 下载文件（带防盗链头 + 403 自动重试）
+                    dl_parsed = _dl_urlparse(download_url)
+                    dl_headers = dict(_download_headers)
+                    if dl_parsed.netloc and dl_parsed.netloc != _target_parsed.netloc:
+                        dl_headers["Referer"] = f"{dl_parsed.scheme or 'https'}://{dl_parsed.netloc}/"
+                    
+                    # 构建候选 URL 列表（原始 URL + 子域名变体），用于 403 重试
+                    candidate_urls = [download_url]
+                    if dl_parsed.netloc:
+                        # 常见的文件托管子域名前缀
+                        # 如深交所: www.szse.cn/disc/... → disc.szse.cn/disc/...
+                        path = dl_parsed.path or ""
+                        base_domain = dl_parsed.netloc.replace("www.", "")
+                        file_subdomains = ["disc", "download", "file", "static", "cdn", "docs"]
+                        for prefix in file_subdomains:
+                            if path.startswith(f"/{prefix}/"):
+                                alt_host = f"{prefix}.{base_domain}"
+                                if alt_host != dl_parsed.netloc:
+                                    alt_url = f"{dl_parsed.scheme or 'https'}://{alt_host}{path}"
+                                    candidate_urls.append(alt_url)
+                                break
+                    
+                    dl_success = False
                     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False) as client:
-                        response = await client.get(download_url)
-                        if response.status_code == 200:
-                            with open(local_path, 'wb') as f:
-                                f.write(response.content)
-                            
-                            _add_log(task_id, f"[SUCCESS] 已下载: {filename}")
-                            downloaded_count += 1
-                            
-                            # 更新报告信息 - 保存相对路径（子文件夹/文件名）
-                            relative_path = f"{folder_name}/{filename}"
-                            report["localPath"] = relative_path
-                            report["isLocal"] = True
-                        else:
-                            _add_log(task_id, f"[WARNING] 下载失败 ({response.status_code}): {report.get('name', '未知')[:30]}...")
+                        for try_url in candidate_urls:
+                            response = await client.get(try_url, headers=dl_headers)
+                            if response.status_code == 200:
+                                with open(local_path, 'wb') as f:
+                                    f.write(response.content)
+                                _add_log(task_id, f"[SUCCESS] 已下载: {filename}")
+                                downloaded_count += 1
+                                relative_path = f"{folder_name}/{filename}"
+                                report["localPath"] = relative_path
+                                report["isLocal"] = True
+                                dl_success = True
+                                break
+                            elif response.status_code == 403 and try_url != candidate_urls[-1]:
+                                # 403 且还有备选 URL，继续尝试
+                                continue
+                            else:
+                                _add_log(task_id, f"[WARNING] 下载失败 ({response.status_code}): {report.get('name', '未知')[:30]}...")
                             
                 except Exception as dl_err:
                     _add_log(task_id, f"[WARNING] 下载出错: {str(dl_err)[:50]}...")

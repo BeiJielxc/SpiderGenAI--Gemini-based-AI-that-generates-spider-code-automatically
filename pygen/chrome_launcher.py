@@ -22,7 +22,7 @@ class ChromeLauncher:
         self,
         debug_port: int = 9222,
         user_data_dir: Optional[str] = None,
-        headless: bool = False,
+        headless: bool = True,
         auto_select_port: bool = True
     ):
         """
@@ -31,7 +31,8 @@ class ChromeLauncher:
         Args:
             debug_port: CDP 调试端口
             user_data_dir: Chrome Profile 目录（None = 自动创建）
-            headless: 是否无头模式
+            headless: 是否无头模式（默认 True，Linux 服务器安全默认；
+                      由 config.yaml 中 cdp.headless 统一控制）
             auto_select_port: 端口被占用时自动选择可用端口
         """
         self.debug_port = debug_port
@@ -165,6 +166,10 @@ class ChromeLauncher:
         
         if self.headless:
             args.extend(["--headless", "--disable-gpu"])
+        
+        # Linux 服务器常见兼容参数（root 用户或容器环境需要 --no-sandbox）
+        if platform.system() == "Linux":
+            args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
         
         # 5. 启动 Chrome
         print(f"→ 正在启动 Chrome (端口 {self.debug_port})...")

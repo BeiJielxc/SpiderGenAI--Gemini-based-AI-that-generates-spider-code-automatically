@@ -165,6 +165,19 @@ class Config:
         """获取CDP操作超时时间（毫秒）"""
         timeout_sec = self.config.get('cdp', {}).get('timeout', 60)
         return timeout_sec * 1000
+
+    @property
+    def browser_headless(self) -> bool:
+        """
+        浏览器无头模式开关（全局控制所有爬取模式下的浏览器是否显示窗口）。
+
+        - False（默认）：显示浏览器窗口，方便本地开发调试
+        - True：无头模式，不显示浏览器窗口（Linux 服务器部署必须设为 True）
+        """
+        v = self.config.get('cdp', {}).get('headless', False)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
     
     @property
     def output_dir(self) -> Path:

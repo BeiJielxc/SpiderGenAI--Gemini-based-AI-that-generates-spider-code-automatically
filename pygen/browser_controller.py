@@ -50,6 +50,13 @@ class BrowserController:
         self._menu_path_meta: Dict[str, Dict[str, Any]] = {}
         self._last_menu_tree: Optional[Dict[str, Any]] = None
 
+        # CDP 增强监听（P0/P1 技术）
+        self.cdp_session = None
+        self._cdp_request_map: Dict[str, Dict[str, Any]] = {}   # requestId -> request info
+        self._pending_request_ids: set = set()                   # 飞行中请求
+        self._last_network_activity: float = 0.0                 # 最后网络活动时间
+        self._cdp_enhanced: bool = False                         # CDP 增强是否成功启用
+
     async def connect(self) -> bool:
         """连接到 Chrome 浏览器"""
         try:
@@ -73,7 +80,9 @@ class BrowserController:
             self.page.set_default_timeout(self.timeout)
             self.page.set_default_navigation_timeout(self.timeout)
 
-            # 设置网络请求监听
+            # 启用 CDP 增强网络监听（P0/P1）
+            await self._init_cdp_enhanced()
+            # 回退：如果 CDP 增强失败，使用 Playwright 事件监听
             self._setup_network_listener()
 
             print("✓ CDP 连接成功")
@@ -105,6 +114,8 @@ class BrowserController:
                     self.page = await self.context.new_page()
                 self.page.set_default_timeout(self.timeout)
                 self.page.set_default_navigation_timeout(self.timeout)
+                self._cdp_enhanced = False
+                await self._init_cdp_enhanced()
                 self._setup_network_listener()
                 return True
         except Exception:
@@ -117,6 +128,8 @@ class BrowserController:
                 self.page = await self.context.new_page()
                 self.page.set_default_timeout(self.timeout)
                 self.page.set_default_navigation_timeout(self.timeout)
+                self._cdp_enhanced = False
+                await self._init_cdp_enhanced()
                 self._setup_network_listener()
                 return True
         except Exception:
@@ -129,9 +142,11 @@ class BrowserController:
             return False
 
     def _setup_network_listener(self):
-        """设置网络请求监听器"""
+        """设置网络请求监听器（CDP 增强可用时为空操作，回退到 Playwright 事件）"""
         if not self.page:
             return
+        if self._cdp_enhanced:
+            return  # CDP 增强已接管网络监听，跳过 Playwright 监听避免重复
 
         async def on_request(request):
             """记录所有请求"""
@@ -199,6 +214,343 @@ class BrowserController:
 
         self.page.on("request", on_request)
         self.page.on("response", on_response)
+
+    # ============ CDP 增强网络监听 (P0/P1) ============
+
+    async def _init_cdp_enhanced(self):
+        """
+        初始化 CDP 增强监听，集成 6 项 CDP 技术：
+        P0-1: Network.setCacheDisabled      — 禁用缓存
+        P0-2: resourceType + postData 补全  — 从 CDP 事件获取完整字段
+        P0-3: addScriptToEvaluateOnNewDocument — 注入 XHR/fetch 钩子
+        P1-4: Network.getResponseBody       — 按 requestId 取完整响应体
+        P1-5: Network.loadingFinished       — 网络空闲检测
+        P1-6: initiator 归因               — 记录请求触发源
+        """
+        if not self.page or not self.context:
+            return
+        try:
+            # 创建 CDP 会话
+            self.cdp_session = await self.context.new_cdp_session(self.page)
+
+            # P0-1: 禁用缓存，确保每次日期操作都触发新请求
+            await self.cdp_session.send('Network.enable')
+            await self.cdp_session.send('Network.setCacheDisabled', {'cacheDisabled': True})
+
+            # P0-3: 注入 XHR/fetch 拦截钩子（在任何页面脚本执行前生效）
+            await self.cdp_session.send('Page.enable')
+            await self.cdp_session.send('Page.addScriptToEvaluateOnNewDocument', {
+                'source': self._get_intercept_script()
+            })
+
+            # 注册 CDP 网络事件监听
+            self.cdp_session.on('Network.requestWillBeSent', self._on_cdp_request_will_be_sent)
+            self.cdp_session.on('Network.responseReceived', self._on_cdp_response_received)
+            self.cdp_session.on('Network.loadingFinished', self._on_cdp_loading_finished)
+            self.cdp_session.on('Network.loadingFailed', self._on_cdp_loading_failed)
+
+            self._cdp_enhanced = True
+            print("  ✓ CDP 增强网络监听已启用（缓存禁用 + XHR/fetch 钩子 + 完整响应体 + 空闲检测 + 归因）")
+        except Exception as e:
+            self._cdp_enhanced = False
+            print(f"  ⚠ CDP 增强初始化失败，将回退到 Playwright 事件: {e}")
+
+    @staticmethod
+    def _get_intercept_script() -> str:
+        """
+        P0-3: 返回注入到每个页面的 XHR/fetch 拦截脚本。
+        
+        功能：
+        - Monkey-patch XMLHttpRequest.prototype.open/send 和 window.fetch
+        - 记录每次 API 调用的 URL、方法、POST body、JS 调用栈
+        - 数据存储在 window.__interceptedAPIs 数组中，供 Layer 0 读取
+        """
+        return r'''
+(() => {
+    if (window.__cdp_api_interceptor_installed) return;
+    window.__cdp_api_interceptor_installed = true;
+    window.__interceptedAPIs = [];
+    const MAX_RECORDS = 300;
+
+    const _origOpen = XMLHttpRequest.prototype.open;
+    const _origSend = XMLHttpRequest.prototype.send;
+    const _origFetch = window.fetch;
+
+    XMLHttpRequest.prototype.open = function(method, url) {
+        this.__cdp_method = method;
+        this.__cdp_url = typeof url === 'string' ? url : String(url);
+        this.__cdp_stack = new Error().stack;
+        return _origOpen.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.send = function(body) {
+        try {
+            var record = {
+                type: 'xhr',
+                method: this.__cdp_method || 'GET',
+                url: this.__cdp_url || '',
+                stack: (this.__cdp_stack || '').slice(0, 1000),
+                postData: typeof body === 'string' ? body.slice(0, 2000) : null,
+                timestamp: Date.now()
+            };
+            if (window.__interceptedAPIs.length >= MAX_RECORDS) {
+                window.__interceptedAPIs.shift();
+            }
+            window.__interceptedAPIs.push(record);
+        } catch(e) {}
+        return _origSend.apply(this, arguments);
+    };
+
+    window.fetch = function(input, init) {
+        try {
+            var url = typeof input === 'string' ? input :
+                      (input instanceof Request ? input.url : String(input));
+            var method = (init && init.method) ||
+                         (input instanceof Request ? input.method : 'GET');
+            var postData = null;
+            if (init && init.body) {
+                if (typeof init.body === 'string') {
+                    postData = init.body.slice(0, 2000);
+                }
+            }
+            var record = {
+                type: 'fetch',
+                method: (method || 'GET').toUpperCase(),
+                url: url,
+                stack: new Error().stack.slice(0, 1000),
+                postData: postData,
+                timestamp: Date.now()
+            };
+            if (window.__interceptedAPIs.length >= MAX_RECORDS) {
+                window.__interceptedAPIs.shift();
+            }
+            window.__interceptedAPIs.push(record);
+        } catch(e) {}
+        return _origFetch.apply(this, arguments);
+    };
+})();
+'''
+
+    def _on_cdp_request_will_be_sent(self, params):
+        """
+        CDP Network.requestWillBeSent 回调
+        P0-2: 记录完整的 resourceType、postData
+        P1-6: 记录 initiator（触发源 + 调用栈）
+        """
+        request = params.get('request', {})
+        url = request.get('url', '')
+        method = request.get('method', 'GET')
+        request_id = params.get('requestId', '')
+        resource_type = params.get('type', '')  # XHR, Fetch, Script, Document, ...
+        initiator = params.get('initiator', {})
+
+        # 过滤纯静态资源（但保留可能是 JSONP 的 .js）
+        skip_extensions = ['.css', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg',
+                           '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.mp3']
+        url_lower = url.lower()
+        parsed_path = url_lower.split('?')[0]
+        if any(parsed_path.endswith(ext) for ext in skip_extensions):
+            return
+
+        # .js 文件：仅保留疑似 JSONP 的（含 callback/jsonp 参数）
+        if parsed_path.endswith('.js'):
+            if not any(kw in url_lower for kw in ['callback', 'jsonp', 'jsoncallback']):
+                return
+
+        post_data = request.get('postData')
+
+        req_info = {
+            "url": url,
+            "method": method,
+            "headers": request.get('headers', {}),
+            # 同时提供两种命名，兼容上下游
+            "post_data": post_data,
+            "postData": post_data,
+            # P0-2: 新增字段
+            "resourceType": resource_type,
+            # P1-6: 新增字段
+            "initiator": initiator,
+            # 内部字段
+            "_requestId": request_id,
+            "_is_api": False,
+        }
+
+        self._cdp_request_map[request_id] = req_info
+        self.network_requests.append(req_info)
+        self._pending_request_ids.add(request_id)
+        self._last_network_activity = time.time()
+
+        # 识别 API 请求（比旧版更精准：使用 resourceType）
+        is_api = False
+        if resource_type in ('XHR', 'Fetch'):
+            is_api = True
+        elif method == 'POST':
+            is_api = True
+        else:
+            api_keywords = ['api', 'ajax', 'json', 'data', 'list', 'search',
+                            'query', 'page', 'get', 'post', '.do', '.action']
+            if any(kw in url_lower for kw in api_keywords):
+                is_api = True
+
+        if is_api:
+            req_info['_is_api'] = True
+            self.api_requests.append(req_info)
+
+    def _on_cdp_response_received(self, params):
+        """CDP Network.responseReceived 回调 — 记录响应头"""
+        request_id = params.get('requestId', '')
+        response = params.get('response', {})
+
+        req_info = self._cdp_request_map.get(request_id)
+        if not req_info:
+            return
+
+        req_info['response_status'] = response.get('status', 0)
+        req_info['response_headers'] = response.get('headers', {})
+        req_info['_response_mime_type'] = response.get('mimeType', '')
+
+    def _on_cdp_loading_finished(self, params):
+        """
+        CDP Network.loadingFinished 回调
+        P1-4: 触发完整响应体获取
+        P1-5: 更新网络空闲状态
+        """
+        request_id = params.get('requestId', '')
+        self._pending_request_ids.discard(request_id)
+        self._last_network_activity = time.time()
+
+        req_info = self._cdp_request_map.get(request_id)
+        if not req_info:
+            return
+
+        # P1-4: 对 API 请求自动获取完整响应体
+        if req_info.get('_is_api'):
+            mime = req_info.get('_response_mime_type', '')
+            # 对 JSON/文本/JavaScript(JSONP) 获取响应体
+            if any(kw in mime for kw in ['json', 'text', 'javascript', 'html']):
+                try:
+                    asyncio.get_event_loop().create_task(
+                        self._fetch_and_store_response_body(request_id)
+                    )
+                except Exception:
+                    pass
+
+    def _on_cdp_loading_failed(self, params):
+        """CDP Network.loadingFailed 回调 — 更新空闲状态"""
+        request_id = params.get('requestId', '')
+        self._pending_request_ids.discard(request_id)
+        self._last_network_activity = time.time()
+
+    async def _fetch_and_store_response_body(self, request_id: str):
+        """
+        P1-4: 使用 CDP Network.getResponseBody 获取完整响应体。
+        
+        优势（对比旧版 response.text()[:2000]）：
+        - 不截断：获取完整的响应数据
+        - 不受 CORS 限制：CDP 直接读取浏览器内存
+        - 支持 base64 解码：自动处理二进制/gzip 响应
+        - 覆盖 JSONP：即使 content-type 是 application/javascript 也能获取
+        """
+        if not self.cdp_session:
+            return
+
+        req_info = self._cdp_request_map.get(request_id)
+        if not req_info:
+            return
+
+        try:
+            result = await self.cdp_session.send('Network.getResponseBody', {
+                'requestId': request_id
+            })
+            body = result.get('body', '')
+            is_base64 = result.get('base64Encoded', False)
+
+            if is_base64 and body:
+                import base64
+                body = base64.b64decode(body).decode('utf-8', errors='replace')
+
+            # 存储完整响应体（不截断！）
+            req_info['response_body'] = body
+            req_info['response_preview'] = body[:2000] if body else ""
+
+            # 解析 JSON 响应，提取字段结构
+            if body:
+                try:
+                    text = body.strip()
+                    # 处理 JSONP 包裹
+                    if text.startswith('/**/'):
+                        text = text[4:].strip()
+                    if text.startswith('?(') and text.endswith(')'):
+                        text = text[2:-1]
+                    jsonp_m = re.match(r'^[a-zA-Z_]\w*\s*\((.*)\)\s*;?\s*$', text, re.S)
+                    if jsonp_m:
+                        text = jsonp_m.group(1)
+
+                    if text.startswith('{') or text.startswith('['):
+                        json_data = json.loads(text)
+                        field_structure = self._extract_json_field_structure(json_data)
+                        if field_structure:
+                            req_info['response_field_structure'] = field_structure
+                except Exception:
+                    pass
+
+        except Exception:
+            # 请求可能已从浏览器内存中逐出
+            pass
+
+    async def wait_for_network_idle(self, timeout: float = 5.0, idle_time: float = 0.5) -> bool:
+        """
+        P1-5: 等待网络空闲。
+        
+        替代硬编码的 asyncio.sleep(2)：
+        - 快站 0.3s 就走（响应快则不等）
+        - 慢站自动多等（直到 timeout）
+        - 精确知道所有请求何时返回
+        
+        Args:
+            timeout: 最大等待时间（秒）
+            idle_time: 无网络活动持续多久算"空闲"（秒）
+            
+        Returns:
+            True 表示网络已空闲，False 表示超时
+        """
+        if not self._cdp_enhanced:
+            # 回退到 sleep
+            await asyncio.sleep(min(timeout, 2.0))
+            return True
+
+        start = time.time()
+        while time.time() - start < timeout:
+            # 检查是否有飞行中的请求
+            if len(self._pending_request_ids) == 0:
+                # 没有飞行中的请求，检查是否持续空闲
+                idle_since = time.time() - self._last_network_activity
+                if idle_since >= idle_time:
+                    return True
+            await asyncio.sleep(0.05)
+
+        # 超时但可能请求已经完成
+        return len(self._pending_request_ids) == 0
+
+    async def get_intercepted_apis(self) -> list:
+        """
+        P0-3: 读取注入钩子捕获的 API 调用记录。
+        
+        返回 window.__interceptedAPIs 数组，每个元素包含：
+        - type: 'xhr' | 'fetch'
+        - method: 'GET' | 'POST' | ...
+        - url: 请求 URL
+        - stack: JS 调用栈（可追溯到触发源）
+        - postData: POST body（如有）
+        - timestamp: 时间戳
+        """
+        if not self.page:
+            return []
+        try:
+            result = await self.page.evaluate('() => window.__interceptedAPIs || []')
+            return result if isinstance(result, list) else []
+        except Exception:
+            return []
 
     async def _get_rating_menubar(self):
         """尽量定位“评级结果发布”页面的顶部菜单（role=menubar）。"""
@@ -1068,6 +1420,8 @@ HTML 片段：
         """清空捕获的请求记录"""
         self.network_requests.clear()
         self.api_requests.clear()
+        self._cdp_request_map.clear()
+        self._pending_request_ids.clear()
 
     async def disconnect(self):
         """断开连接"""

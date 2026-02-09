@@ -343,7 +343,8 @@ const App: React.FC = () => {
                       options={[
                         { value: 'single_page', label: '单一板块爬取' },
                         { value: 'multi_page', label: '多板块爬取 (手动选目录树+抓包映射)' },
-                        { value: 'auto_detect', label: '自动探测板块并爬取 (通用交互探测)' }
+                        { value: 'auto_detect', label: '自动探测板块并爬取 (通用交互探测)' },
+                        { value: 'date_range_api', label: '日期筛选类网站爬取 (API直连+自校准)' }
                       ]}
                     />
                     <SelectInput

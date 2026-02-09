@@ -305,10 +305,11 @@ class PlaywrightSignalsCollector(SignalsCollector):
     - Console 日志
     """
     
-    def __init__(self, output_dir: Optional[str] = None):
+    def __init__(self, output_dir: Optional[str] = None, headless: bool = True):
         super().__init__(output_dir, capture_screenshot=True)
         self._playwright = None
         self._browser = None
+        self._headless = headless
     
     def collect_page_signals(
         self,
@@ -336,7 +337,7 @@ class PlaywrightSignalsCollector(SignalsCollector):
         
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=self._headless)
                 context = browser.new_context()
                 page = context.new_page()
                 
