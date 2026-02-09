@@ -14,13 +14,14 @@
 - [输出位置 / Outputs](#outputs)
 - [项目架构与流程 / Architecture & Flow](#architecture-flow)
 - [方法与技术亮点 / Highlights](#highlights)
+- [日期控件检测与 API 提取 / Date Detection & API Extraction](#date-detection)
 - [目录结构与核心文件说明 / Structure & Key files](#structure-files)
 - [安全与 GitHub 提交建议 / Security checklist](#security)
 - [常见问题 / Troubleshooting](#troubleshooting)
 
 ---
 
-## 🦹🏻Authors: Liu，Jack Xingchen — Deloitte Shanghai
+## 🦹🏻Authors: Liu， Jack Xingchen — Deloitte Shanghai
 
 <a id="overview"></a>
 ## 简介 (Overview)
@@ -56,7 +57,7 @@ Generates runnable Python crawlers, supports multi-category crawling, visualizes
 
 ### 环境要求 (Prerequisites)
 
-- **Windows 10/11 / macOS** 
+- **Windows 10/11 / macOS**（本文以 Windows 为主，同时补充 macOS 指令）  
 - **Python**：建议 3.10+  
 - **Node.js**：建议 18+ / 20+  
 - **Google Chrome**：已安装（后端会自动寻找 Chrome 并启动 CDP）
@@ -212,6 +213,7 @@ npm run dev
    - **单一板块爬取**：直接执行
    - **多板块爬取（手动）**：先进入目录树页选择板块，再执行
    - **自动探测板块并爬取**：由系统自动探测交互入口并抓取
+   - **日期筛选类网站爬取**：用于上交所，深交所这类网站部分网站需要先筛选日期才会出报告结果（且筛选日期后页面url不变，因此需要探测日期控件获取到用户前端给定的准确日期）
 3. 填写 URL、日期范围、是否下载文件等
 4. 在执行页查看日志与结果，必要时下载生成脚本
 
@@ -305,6 +307,101 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 
 ---
 
+<a id="date-detection"></a>
+## 日期控件检测与 API 提取 (Date Detection & API Extraction)
+
+当用户选择 **`date_range_api`（日期范围 API 直连）** 爬取模式时，系统采用**四层渐进式架构**自动检测页面的日期筛选接口，核心实现在 `pygen/date_api_extractor.py`。
+
+### 四层架构 (Four-layer Architecture)
+
+```text
+用户输入 URL + 日期范围
+        │
+        ▼
+┌─ Layer 0: JS 全局变量扫描 ──────────────────────────┐
+│  技术: Playwright page.evaluate() 扫描 window 对象    │
+│  原理: 直接读取前端配置变量 (如 LatestAnnouncement)    │
+│  提取: API URL + 日期参数名 + 请求参数                 │
+│  成功 → 跳过所有后续层，直接生成确定性脚本              │
+└──────────── 失败 ▼ ─────────────────────────────────┘
+┌─ Layer 1: 纯 API 直连 ─────────────────────────────┐
+│  技术: CDP Network 事件监听                          │
+│  原理: 分析页面加载时的网络请求，识别含日期参数的 API   │
+└──────────── 失败 ▼ ─────────────────────────────────┘
+┌─ Layer 2: DOM 特征检测 + 自动操作 ──────────────────┐
+│  技术: Playwright DOM 查询 + CDP Input.insertText    │
+│  支持: Laydate / ElementUI / AntDesign / Bootstrap   │
+│        / native input / 通用 input[placeholder]      │
+│  步骤: 检测控件类型 → 三级填写策略 → 点击提交 → 捕获 API│
+└──────────── 失败 ▼ ─────────────────────────────────┘
+┌─ Layer 3: 截图 + LLM 视觉分析 ─────────────────────┐
+│  技术: Playwright screenshot + Gemini/Qwen 多模态    │
+│  兜底: 处理无法程序化识别的非标日期控件                │
+└──────────── 失败 → 回退到通用 LLM 生成爬虫 ──────────┘
+        │ 任一层成功
+        ▼
+┌─ 验证 + 脚本生成 ──────────────────────────────────┐
+│  1. httpx 重放 API 验证数据 (自动截断未来日期)        │
+│  2. analyze_response_schema() 自动推断字段映射        │
+│  3. LLM "完形填空" 补全未识别字段 (可选)              │
+│  4. 确定性模板生成 Python 爬虫脚本 (不调 LLM)         │
+└────────────────────────────────────────────────────┘
+```
+
+越靠前的层**越精准、越快、越不依赖 LLM**。例如上交所 (SSE) 在 Layer 0 即可直接命中，全程不需要调用大模型。
+
+### 日期控件自动操作 — 三级填写策略 (Input Fill Strategy)
+
+Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件：
+
+| 优先级 | 策略 | 技术 | 适用场景 |
+|--------|------|------|---------|
+| 1 | Playwright `fill()` | Playwright API | 非 readonly 的普通 input |
+| 2 | CDP `Input.insertText` | Chrome DevTools Protocol | readonly 的 Laydate / ElementUI 等 (引擎级键盘输入，触发完整原生事件链) |
+| 3 | JS `nativeSetter.call()` | JavaScript evaluate | CDP 不可用时的兜底 |
+
+### 字段映射自适应 (Adaptive Field Mapping)
+
+`pygen/deterministic_templates.py` 中的 `analyze_response_schema()` 从 API 响应中自动推断字段映射（日期、标题、下载链接、证券代码等），三层递进：
+
+1. **自动检测**：正则匹配字段名 + 值格式识别（如 `SSEDATE` 匹配日期模式、`attachPath` 匹配 URL 模式）
+2. **LLM 完形填空**：对未识别的字段类别，构造 cloze prompt 让 LLM 补全
+3. **通用兜底列表**：`["publishDate", "date", "Date", ...]` 等常见字段名
+
+### 防盗链下载 (Anti-Hotlinking Download)
+
+生成的爬虫脚本输出 JSON 中包含 `downloadHeaders` 字段（`Referer` + `User-Agent`），`api.py` 下载 PDF 时自动使用。如果首次下载返回 403，会自动尝试子域名变体（如 `www.szse.cn/disc/...` → `disc.szse.cn/disc/...`）。
+
+### 核心函数说明 (Key Functions)
+
+**`pygen/date_api_extractor.py`** — 日期 API 提取器
+
+| 函数 | 说明 |
+|------|------|
+| `extract_date_api()` | 主入口：依次执行 Layer 0→1→2→3，返回 `DateAPIExtractionResult` |
+| `_try_layer0_global_var_scan()` | Layer 0：在浏览器中执行 JS 扫描 `window` 全局变量，查找 API 配置 |
+| `_build_candidate_from_global_var()` | 从 JS 扫描结果构建候选：解析 URL query params、过滤非参数字段、推断 HTTP 方法 |
+| `_try_layer1_api_direct()` | Layer 1：分析 CDP 捕获的网络请求，识别含日期参数的 API |
+| `_try_layer2_dom_detect()` | Layer 2：检测日期控件类型 → 操作控件 → 捕获触发的 API 请求 |
+| `_detect_date_picker()` | 检测页面日期控件类型（Laydate/ElementUI/AntDesign/Bootstrap/native/generic） |
+| `_operate_date_picker()` | 根据控件类型选择操作策略（优先 fill+submit，回退到控件特定逻辑） |
+| `_operate_fill_and_submit()` | 泛化的日期填写+提交策略：查找 input → `_safe_fill()` → 点击查询按钮 |
+| `_safe_fill()` | 三级递进填写：Playwright fill → CDP `Input.insertText` → JS 设值 |
+| `_try_layer3_llm_vision()` | Layer 3：截图 → LLM 分析操作指令 → 按指令自动操作 |
+| `verify_candidate()` | 验证候选 API：httpx 重放请求（自动截断未来日期），检查响应有效性 |
+| `build_replay_url()` | 构建重放 URL：替换日期参数、处理 JSONP 回调、补充分页参数 |
+
+**`pygen/deterministic_templates.py`** — 确定性脚本模板生成器
+
+| 函数 | 说明 |
+|------|------|
+| `render_date_range_api_script()` | 主入口：接收 API 信息 + 字段映射，渲染出完整可运行的 Python 爬虫脚本 |
+| `analyze_response_schema()` | 从 API 响应 JSON 中自动推断字段映射（日期/标题/URL/证券代码/名称） |
+| `build_llm_cloze_prompt()` | 构造 LLM "完形填空" 提示词，用于补全自动推断未覆盖的字段 |
+| `parse_llm_cloze_response()` | 解析 LLM 返回的完形填空 JSON 结果 |
+
+---
+
 <a id="structure-files"></a>
 ## 目录结构与核心文件说明 (Structure & Key files)
 
@@ -336,6 +433,8 @@ GET /api/status/{taskId}      前端轮询状态，展示日志与结果
 - `pygen/post_processor.py`：生成后后处理（注入日期、分类映射、输出兜底等）
 - `pygen/validator.py`：生成代码的基础校验（syntax / heuristics）
 - `pygen/signals_collector.py`：采集页面信号（结构、请求等）用于提示词/决策
+- `pygen/date_api_extractor.py`：**日期 API 四层提取器**（Layer 0~3 渐进检测、日期控件自动操作、API 验证与重放）
+- `pygen/deterministic_templates.py`：**确定性脚本模板生成器**（字段映射自适应 + LLM 完形填空 + 纯模板渲染，不调用 LLM）
 - `pygen/date_extractor.py`：日期相关辅助逻辑
 - `pygen/error_cases.py`：错误样例与规则集合（用于更稳的生成/修复）
 - `pygen/failure_classifier.py`：失败分类（用于定位问题与策略调整）
