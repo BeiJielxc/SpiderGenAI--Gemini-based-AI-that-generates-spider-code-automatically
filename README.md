@@ -405,11 +405,6 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 <a id="structure-files"></a>
 ## 目录结构与核心文件说明 (Structure & Key files)
 
-> 说明 / Note  
-> - 下面覆盖“本仓库内的主要源码与配置文件”。  
-> - 像 `node_modules/`、`__pycache__/`、`pygen/output/`、Chrome Profile 等属于依赖/运行产物，不建议纳入版本控制。  
-> - This section focuses on source/config files; runtime artifacts should be ignored.
-
 ### 根目录 (Root)
 
 - `README.md`：本说明（this file）
