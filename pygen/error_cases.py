@@ -12,7 +12,7 @@ PyGen 错误案例库 - 结构化的 Few-shot 错误经验
     在 ERROR_CASES 列表中添加新的错误案例字典
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
