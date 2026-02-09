@@ -414,7 +414,6 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 
 - `README.md`：本说明（this file）
 - `config.yaml`：**你的真实配置（配置模板）**
-- `config_copy.yaml`：配置模板（可提交 / safe to commit as an example）
 - `browser_controller.py`：历史/备份文件（当前后端实际使用的是 `pygen/browser_controller.py`）
 - `scripts/test_gemini_connection.py`：LLM 连通性测试脚本
 
