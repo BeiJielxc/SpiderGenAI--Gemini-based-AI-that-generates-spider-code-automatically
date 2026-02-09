@@ -405,21 +405,10 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 <a id="structure-files"></a>
 ## 目录结构与核心文件说明 (Structure & Key files)
 
-> 说明 / Note  
-> - 下面覆盖“本仓库内的主要源码与配置文件”。  
-> - 像 `node_modules/`、`__pycache__/`、`pygen/output/`、Chrome Profile 等属于依赖/运行产物，不建议纳入版本控制。  
-> - This section focuses on source/config files; runtime artifacts should be ignored.
-
 ### 根目录 (Root)
 
 - `README.md`：本说明（this file）
-- `config.yaml`：**你的真实配置（不要提交 / do NOT commit）**
-- `config_copy.yaml`：配置模板（可提交 / safe to commit as an example）
-- `browser_controller.py`：历史/备份文件（当前后端实际使用的是 `pygen/browser_controller.py`）
-- `scripts/test_gemini_connection.py`：LLM 连通性测试脚本
-- `sample.xlsx`：示例文件（非运行必需）
-- `qwen-crawler-config-generator.zip`：打包文件（非运行必需）
-- `SpiderGenAI--Gemini-based-AI-that-generates-spider-code-automatically/`：参考资料/文档（含 PDF），不影响本项目运行
+- `config.yaml`：**你的真实配置（配置模板）**
 
 ### 后端 `pygen/`
 
@@ -456,21 +445,6 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 - `frontend/vite.config.ts` / `tsconfig.json`：构建与 TS 配置
 - `frontend/metadata.json`：项目元信息（非关键）
 - `frontend/.gitignore` / `frontend/README.md`：前端子模块忽略与说明
-
----
-
-<a id="security"></a>
-## 安全与 GitHub 提交建议 (Security checklist)
-
-建议在 `.gitignore` 排除（示例）：
-
-- `config.yaml`（真实密钥）
-- `frontend/.env.local`（如果你放了真实 key）
-- `pygen/chrome-profile/`（浏览器登录态/隐私数据）
-- `pygen/output/`（爬取结果）
-- `__pycache__/`、`*.pyc`、`node_modules/`、`*.log`、`.cursor/`
-
----
 
 <a id="troubleshooting"></a>
 ## 常见问题 (Troubleshooting)
