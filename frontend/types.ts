@@ -159,4 +159,8 @@ export interface SSEEvent {
 }
 
 // ============ API Base URL ============
-export const API_BASE_URL = 'http://localhost:8000';
+// 自动判断：本地开发 → 直连后端 8000；线上部署 → 空字符串走 Nginx 反代
+export const API_BASE_URL =
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:8000'
+    : '';
