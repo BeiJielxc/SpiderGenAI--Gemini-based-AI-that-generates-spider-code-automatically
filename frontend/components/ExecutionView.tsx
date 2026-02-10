@@ -20,9 +20,11 @@ import {
   CheckSquare,
   StopCircle,
   Eye,
-  Info
+  Info,
+  Clock,
+  Users
 } from 'lucide-react';
-import { ProcessStep, StepStatus, CrawlerFormData, API_BASE_URL, TaskStatusResponse, GenerateRequest, ReportFile, NewsArticle } from '../types';
+import { ProcessStep, StepStatus, CrawlerFormData, API_BASE_URL, TaskStatusResponse, GenerateRequest, ReportFile, NewsArticle, QueueInfo } from '../types';
 
 interface ExecutionViewProps {
   mode: string;
@@ -71,7 +73,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   );
   
   const [logContent, setLogContent] = useState<string>("");
-  const [taskStatus, setTaskStatus] = useState<'pending' | 'running' | 'completed' | 'failed'>('pending');
+  const [taskStatus, setTaskStatus] = useState<'pending' | 'queued' | 'running' | 'completed' | 'failed'>('pending');
   const [resultFile, setResultFile] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
@@ -97,6 +99,12 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   // 大量数据截断提示
   const [hasMoreReports, setHasMoreReports] = useState(false);
   const [totalReportsCount, setTotalReportsCount] = useState(0);
+  
+  // 队列信息
+  const [queuePosition, setQueuePosition] = useState(0);
+  const [queueWaiting, setQueueWaiting] = useState(0);
+  const [queueRunning, setQueueRunning] = useState(0);
+  const [estimatedWait, setEstimatedWait] = useState(0);
   
   const logScrollRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
@@ -187,6 +195,12 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
       setTaskStatus(data.status);
       setLogContent(data.logs.join('\n'));
       
+      // 更新队列信息
+      if (data.queuePosition !== undefined) setQueuePosition(data.queuePosition);
+      if (data.queueWaitingCount !== undefined) setQueueWaiting(data.queueWaitingCount);
+      if (data.queueRunningCount !== undefined) setQueueRunning(data.queueRunningCount);
+      if (data.estimatedWaitSeconds !== undefined) setEstimatedWait(data.estimatedWaitSeconds);
+      
       if (data.resultFile) {
         setResultFile(data.resultFile);
       }
@@ -228,6 +242,10 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
       
       // 更新步骤状态（确保与后端同步）
       setSteps(prev => prev.map((step, idx) => {
+        // 排队中：所有步骤保持 pending
+        if (data.status === 'queued') {
+          return { ...step, status: 'pending' };
+        }
         // 如果任务已完成，所有步骤都应该是 completed
         if (data.status === 'completed' && idx < prev.length) {
           return { ...step, status: 'completed' };
@@ -513,6 +531,12 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
         
         {/* 状态指示 */}
         <div className="ml-auto flex items-center gap-2">
+          {taskStatus === 'queued' && (
+            <span className="flex items-center gap-1 px-3 py-1 bg-amber-50 text-amber-600 rounded-full text-sm">
+              <Clock size={14} />
+              排队中（第 {queuePosition} 位）
+            </span>
+          )}
           {taskStatus === 'running' && (
             <span className="flex items-center gap-1 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-sm">
               <Loader2 size={14} className="animate-spin" />
@@ -553,6 +577,39 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
             <PlayCircle size={18} className="text-emerald-500" />
             执行进度
           </div>
+          {/* 排队等待横幅 */}
+          {taskStatus === 'queued' && queuePosition > 0 && (
+            <div className="mx-4 mt-4 px-4 py-4 bg-amber-50 border border-amber-200 rounded-xl">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="p-2 bg-amber-100 rounded-lg">
+                  <Users size={18} className="text-amber-600" />
+                </div>
+                <div>
+                  <p className="font-bold text-amber-800 text-sm">
+                    正在排队等待 - 第 {queuePosition} 位
+                  </p>
+                  <p className="text-xs text-amber-600 mt-0.5">
+                    {estimatedWait > 0 
+                      ? `预计等待约 ${Math.ceil(estimatedWait / 60)} 分钟`
+                      : '即将开始...'
+                    }
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-4 text-xs text-amber-700 mt-2 pt-2 border-t border-amber-200">
+                <span>等待中: {queueWaiting}</span>
+                <span>运行中: {queueRunning}</span>
+              </div>
+              {/* 排队进度条 */}
+              <div className="mt-2 h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-amber-400 rounded-full transition-all duration-1000"
+                  style={{ width: `${Math.max(5, 100 - queuePosition * 20)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {steps.map((step) => (
               <div key={step.id} className="flex items-start gap-3">
@@ -596,7 +653,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
                  <span className="text-lg font-bold text-gray-800">运行日志</span>
                </div>
                {/* 停止运行按钮 */}
-               {(taskStatus === 'running' || taskStatus === 'pending') && (
+               {(taskStatus === 'running' || taskStatus === 'pending' || taskStatus === 'queued') && (
                  <button
                    onClick={handleStopTask}
                    disabled={isStopping}

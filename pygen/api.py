@@ -83,7 +83,7 @@ class NewsArticle(BaseModel):
 
 class TaskStatusResponse(BaseModel):
     taskId: str
-    status: str  # 'pending' | 'running' | 'completed' | 'failed'
+    status: str  # 'pending' | 'queued' | 'running' | 'completed' | 'failed'
     currentStep: int
     totalSteps: int
     stepLabel: str
@@ -99,6 +99,11 @@ class TaskStatusResponse(BaseModel):
     newsArticles: Optional[List[NewsArticle]] = None
     markdownFile: Optional[str] = None
     totalCount: Optional[int] = None  # 总结果数（当结果被截断时使用）
+    # 队列信息（仅 enable_queue=true 时有值）
+    queuePosition: Optional[int] = None       # 排队位置（0=正在运行/已完成）
+    queueWaitingCount: Optional[int] = None   # 当前队列等待数
+    queueRunningCount: Optional[int] = None   # 当前正在运行数
+    estimatedWaitSeconds: Optional[int] = None  # 预估等待秒数
 
 # ============ 全局状态 ============
 
@@ -120,6 +125,10 @@ task_cancelled: Dict[str, bool] = {}
 # 配置
 config: Optional[Config] = None
 
+# ── 队列 & SSE（仅 config 开启时才实例化，见 lifespan） ──
+_task_queue = None       # type: ignore  # Optional[TaskQueue]
+_event_broadcaster = None  # type: ignore  # Optional[EventBroadcaster]
+
 
 def _is_cancelled(task_id: str) -> bool:
     """检查任务是否已被取消"""
@@ -130,15 +139,32 @@ def _is_cancelled(task_id: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global config
+    global config, _task_queue, _event_broadcaster
     try:
         config = Config()
         print("✓ 配置加载成功")
     except Exception as e:
         print(f"✗ 配置加载失败: {e}")
         config = None
+    
+    # ── 按配置启用队列 / SSE ──
+    if config and config.queue_enabled:
+        from queue_manager import TaskQueue
+        _task_queue = TaskQueue(max_concurrency=config.max_concurrency)
+        await _task_queue.start()
+        print(f"✓ 任务队列已启动 (max_concurrency={config.max_concurrency})")
+
+    if config and config.sse_enabled:
+        from realtime import EventBroadcaster
+        _event_broadcaster = EventBroadcaster()
+        print("✓ SSE 事件广播已启用")
+
     yield
+
     # 清理
+    if _task_queue is not None:
+        await _task_queue.shutdown()
+        print("✓ 任务队列已关闭")
     print("应用关闭")
 
 # ============ FastAPI App ============
@@ -150,10 +176,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS 配置
+# CORS 配置（线上部署通过 Nginx 反代同域，本地开发需要 localhost 跨域）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -165,13 +191,24 @@ def _add_log(task_id: str, message: str):
     """添加日志到任务"""
     if task_id in tasks:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        tasks[task_id]["logs"].append(f"[{timestamp}] {message}")
+        log_line = f"[{timestamp}] {message}"
+        tasks[task_id]["logs"].append(log_line)
+        # SSE 推送日志（如果启用）
+        if _event_broadcaster is not None:
+            asyncio.ensure_future(
+                _event_broadcaster.publish(task_id, "log", {"message": log_line})
+            )
 
 def _update_step(task_id: str, step: int, label: str):
     """更新任务步骤"""
     if task_id in tasks:
         tasks[task_id]["currentStep"] = step
         tasks[task_id]["stepLabel"] = label
+        # SSE 推送步骤变化
+        if _event_broadcaster is not None:
+            asyncio.ensure_future(
+                _event_broadcaster.publish(task_id, "step", {"currentStep": step, "stepLabel": label})
+            )
 
 # ============ 核心逻辑：获取目录树 ============
 
@@ -240,6 +277,10 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
     try:
         tasks[task_id]["status"] = "running"
         task_cancelled[task_id] = False  # 初始化取消标志
+
+        # SSE 推送状态变更（从 queued → running）
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "status", {"status": "running"})
 
         # 读取配置：是否启用自动修复/检查/后处理
         auto_repair_enabled = config.llm_auto_repair if config else True
@@ -1287,12 +1328,19 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["resultFile"] = str(output_path)
+
+        # SSE 推送完成
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "complete", {"status": "completed"})
         
     except asyncio.CancelledError:
         # asyncio 任务被取消（用户点击停止）
-        _add_log(task_id, "[INFO] ⛔ 任务已被强制停止")
+        _add_log(task_id, "[INFO] 任务已被强制停止")
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = "任务被用户强制停止"
+        # SSE 推送取消
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "cancelled", {"status": "failed"})
         # 不要重新抛出，让 finally 执行清理
         
     except Exception as e:
@@ -1308,6 +1356,13 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             _add_log(task_id, f"[ERROR] {traceback.format_exc()}")
         
         tasks[task_id]["status"] = "failed"
+
+        # SSE 推送失败
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "failed", {
+                "status": "failed",
+                "error": tasks[task_id].get("error", "")
+            })
         
     finally:
         # 清理浏览器资源
@@ -1329,6 +1384,12 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             del task_cancelled[task_id]
         if task_id in task_asyncio_tasks:
             del task_asyncio_tasks[task_id]
+        # 延迟清理 SSE 订阅（给客户端一点时间收到终止事件）
+        if _event_broadcaster is not None:
+            async def _delayed_cleanup():
+                await asyncio.sleep(5)
+                _event_broadcaster.cleanup(task_id)
+            asyncio.ensure_future(_delayed_cleanup())
 
 # ============ API 路由 ============
 
@@ -1363,18 +1424,24 @@ async def start_generation(request: GenerateRequest):
     启动爬虫脚本生成任务
     
     返回任务 ID，前端可通过 /api/status/{task_id} 轮询状态
+    queue 模式下任务先排队，非 queue 模式（本地开发默认）直接运行
     """
     if not request.url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
     
     # 创建任务
     task_id = str(uuid.uuid4())[:8]
+
+    # 判断是否进入排队
+    use_queue = _task_queue is not None
+    initial_status = "queued" if use_queue else "pending"
+
     tasks[task_id] = {
         "taskId": task_id,
-        "status": "pending",
+        "status": initial_status,
         "currentStep": 0,
         "totalSteps": 12,  # 增加了代码验证和结果验证步骤
-        "stepLabel": "准备中...",
+        "stepLabel": "排队等待中..." if use_queue else "准备中...",
         "logs": [],
         "resultFile": None,
         "error": None,
@@ -1387,11 +1454,27 @@ async def start_generation(request: GenerateRequest):
         "createdAt": time.time()
     }
     
-    # 使用 asyncio.create_task 创建可取消的任务
-    asyncio_task = asyncio.create_task(_run_generation_task(task_id, request))
-    task_asyncio_tasks[task_id] = asyncio_task
-    
-    return {"taskId": task_id, "message": "任务已创建"}
+    if use_queue:
+        # 排队模式：放入队列，worker 会在有空位时启动任务
+        position = await _task_queue.enqueue(
+            task_id,
+            lambda _tid=task_id, _req=request: _run_generation_task(_tid, _req)
+        )
+        _add_log(task_id, f"[INFO] 任务已加入队列，当前排在第 {position} 位")
+
+        # SSE 推送排队位置
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "queue_position", {
+                "position": position,
+                **_task_queue.get_queue_info(task_id)
+            })
+
+        return {"taskId": task_id, "message": f"任务已加入队列（第 {position} 位）"}
+    else:
+        # 直接运行模式（兼容原有行为）
+        asyncio_task = asyncio.create_task(_run_generation_task(task_id, request))
+        task_asyncio_tasks[task_id] = asyncio_task
+        return {"taskId": task_id, "message": "任务已创建"}
 
 @app.get("/api/status/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str):
@@ -1404,6 +1487,22 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="任务不存在")
     
     task = tasks[task_id]
+
+    # 队列信息（仅队列开启时返回）
+    queue_position = None
+    queue_waiting = None
+    queue_running = None
+    estimated_wait = None
+    if _task_queue is not None:
+        qi = _task_queue.get_queue_info(task_id)
+        queue_position = qi["position"]
+        queue_waiting = qi["waitingCount"]
+        queue_running = qi["runningCount"]
+        estimated_wait = qi["estimatedWaitSeconds"]
+        # 更新排队中任务的 stepLabel（实时位置）
+        if task["status"] == "queued" and queue_position > 0:
+            task["stepLabel"] = f"排队等待中...（第 {queue_position} 位，预计 {estimated_wait}s）"
+
     return TaskStatusResponse(
         taskId=task["taskId"],
         status=task["status"],
@@ -1419,7 +1518,11 @@ async def get_task_status(task_id: str):
         pdfOutputDir=task.get("pdfOutputDir"),
         newsArticles=task.get("newsArticles"),
         markdownFile=task.get("markdownFile"),
-        totalCount=task.get("totalCount")
+        totalCount=task.get("totalCount"),
+        queuePosition=queue_position,
+        queueWaitingCount=queue_waiting,
+        queueRunningCount=queue_running,
+        estimatedWaitSeconds=estimated_wait,
     )
 
 @app.get("/api/download/{filename}")
@@ -1539,7 +1642,17 @@ async def stop_task(task_id: str):
         return {"message": "任务已结束", "status": task["status"]}
     
     _add_log(task_id, "[INFO] 收到停止请求，正在强制终止任务...")
-    
+
+    # 如果任务还在排队中，直接从队列移除
+    if _task_queue is not None and task["status"] == "queued":
+        _task_queue.cancel(task_id)
+        task["status"] = "failed"
+        task["error"] = "任务在排队中被取消"
+        _add_log(task_id, "[INFO] 任务已从排队队列中移除")
+        if _event_broadcaster is not None:
+            await _event_broadcaster.publish(task_id, "cancelled", {"status": "failed"})
+        return {"message": "任务已取消（排队中）", "taskId": task_id}
+
     # 设置取消标志
     task_cancelled[task_id] = True
     
@@ -1613,6 +1726,45 @@ async def stop_task(task_id: str):
     _add_log(task_id, "[INFO] ✅ 任务已停止")
     
     return {"message": "任务已停止", "taskId": task_id}
+
+# ============ 队列 & SSE 路由 ============
+
+@app.get("/api/queue/info")
+async def get_queue_info():
+    """
+    获取全局队列状态
+
+    仅在 enable_queue=true 时返回有意义的数据；
+    关闭时返回 queueEnabled=false，前端据此隐藏排队 UI。
+    """
+    if _task_queue is None:
+        return {"queueEnabled": False}
+    return _task_queue.get_queue_info()
+
+
+@app.get("/api/events/{task_id}")
+async def sse_events(task_id: str):
+    """
+    SSE 实时事件流
+
+    前端通过 EventSource('/api/events/{taskId}') 订阅。
+    仅在 enable_sse=true 时可用，否则返回 404。
+    """
+    if _event_broadcaster is None:
+        raise HTTPException(status_code=404, detail="SSE 未启用")
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    return StreamingResponse(
+        _event_broadcaster.subscribe(task_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx 不缓冲
+        }
+    )
+
 
 # ============ 主入口 ============
 

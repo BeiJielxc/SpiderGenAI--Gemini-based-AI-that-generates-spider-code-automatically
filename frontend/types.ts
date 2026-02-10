@@ -111,7 +111,7 @@ export interface GenerateResponse {
 
 export interface TaskStatusResponse {
   taskId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed';
   currentStep: number;
   totalSteps: number;
   stepLabel: string;
@@ -130,6 +130,32 @@ export interface TaskStatusResponse {
   newsArticles?: NewsArticle[];
   // Markdown 文件路径（新闻舆情场景）
   markdownFile?: string;
+  // 总结果数（当结果被截断时使用）
+  totalCount?: number;
+  // 队列信息（仅 enable_queue=true 时有值）
+  queuePosition?: number;         // 排队位置（0=正在运行/已完成）
+  queueWaitingCount?: number;     // 当前队列等待数
+  queueRunningCount?: number;     // 当前正在运行数
+  estimatedWaitSeconds?: number;  // 预估等待秒数
+}
+
+// ============ 队列全局信息 ============
+export interface QueueInfo {
+  queueEnabled: boolean;
+  waitingCount?: number;
+  runningCount?: number;
+  maxConcurrency?: number;
+  position?: number;
+  estimatedWaitSeconds?: number;
+  averageTaskSeconds?: number;
+}
+
+// ============ SSE 事件类型 ============
+export interface SSEEvent {
+  type: 'queue_position' | 'log' | 'step' | 'status' | 'complete' | 'failed' | 'cancelled';
+  taskId: string;
+  timestamp: number;
+  [key: string]: any;
 }
 
 // ============ API Base URL ============

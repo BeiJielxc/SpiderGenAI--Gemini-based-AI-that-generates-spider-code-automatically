@@ -179,6 +179,36 @@ class Config:
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
     
+    # ============ 服务端（多人在线）配置 ============
+
+    def _server_cfg(self) -> Dict[str, Any]:
+        return self.config.get("server", {}) or {}
+
+    @property
+    def queue_enabled(self) -> bool:
+        """是否启用任务排队/并发控制"""
+        v = self._server_cfg().get("enable_queue", False)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @property
+    def max_concurrency(self) -> int:
+        """允许同时运行的最大任务数"""
+        v = self._server_cfg().get("max_concurrency", 1)
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 1
+
+    @property
+    def sse_enabled(self) -> bool:
+        """是否启用 SSE 实时推送"""
+        v = self._server_cfg().get("enable_sse", False)
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
     @property
     def output_dir(self) -> Path:
         """生成的爬虫脚本输出目录"""
