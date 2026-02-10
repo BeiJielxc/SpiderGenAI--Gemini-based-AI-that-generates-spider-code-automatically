@@ -1,5 +1,5 @@
 {
-  "name": "Qwen Crawler Config Generator",
-  "description": "A clean and aesthetic interface for configuring crawler parameters based on Qwen code.",
+  "name": "SpiderGenAI",
+  "description": "SpiderGenAI - 基于gemini的网页爬虫代码生成agent",
   "requestFramePermissions": []
 }

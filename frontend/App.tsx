@@ -194,7 +194,7 @@ const App: React.FC = () => {
                 </div>
                 <div>
                   <h1 className="text-3xl font-bold text-gray-900 tracking-tight mb-2">
-                    基于qwen的爬虫代码自动生成脚本
+                    SpiderGenAI-基于gemini的网页爬虫代码生成agent
                   </h1>
                   <p className="text-gray-500 text-base">
                     配置您的爬虫参数以生成自动化脚本
