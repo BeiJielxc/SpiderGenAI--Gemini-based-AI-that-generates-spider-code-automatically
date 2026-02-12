@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react';
 import { InputProps } from '../types';
 
@@ -13,7 +14,16 @@ const DateInput: React.FC<InputProps> = ({
 }) => {
   const [showCalendar, setShowCalendar] = useState(false);
   const [currentDate, setCurrentDate] = useState(new Date());
+  const [calendarPosition, setCalendarPosition] = useState({
+    top: 0,
+    left: 0,
+    openUp: false
+  });
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const calendarRef = useRef<HTMLDivElement>(null);
+  const CALENDAR_WIDTH = 280;
+  const CALENDAR_HEIGHT = 320;
 
   // Parse initial value if present
   useEffect(() => {
@@ -28,13 +38,49 @@ const DateInput: React.FC<InputProps> = ({
   // Close calendar when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      const clickedTrigger = containerRef.current?.contains(target);
+      const clickedCalendar = calendarRef.current?.contains(target);
+      if (!clickedTrigger && !clickedCalendar) {
         setShowCalendar(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const updateCalendarPosition = useCallback(() => {
+    if (!triggerRef.current) return;
+
+    const rect = triggerRef.current.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const openUp = spaceBelow < CALENDAR_HEIGHT && spaceAbove > spaceBelow;
+
+    let left = rect.left;
+    const maxLeft = window.innerWidth - CALENDAR_WIDTH - 8;
+    if (left > maxLeft) left = maxLeft;
+    if (left < 8) left = 8;
+
+    setCalendarPosition({
+      top: openUp ? rect.top - 8 : rect.bottom + 8,
+      left,
+      openUp
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!showCalendar) return;
+
+    updateCalendarPosition();
+    window.addEventListener('resize', updateCalendarPosition);
+    window.addEventListener('scroll', updateCalendarPosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updateCalendarPosition);
+      window.removeEventListener('scroll', updateCalendarPosition, true);
+    };
+  }, [showCalendar, updateCalendarPosition]);
 
   const daysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
   const firstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
@@ -131,8 +177,22 @@ const DateInput: React.FC<InputProps> = ({
       );
     }
 
-    return (
-      <div className="absolute top-full left-0 mt-2 p-4 bg-white rounded-xl shadow-xl border border-gray-100 z-50 min-w-[280px] animate-in fade-in zoom-in-95 duration-200">
+    if (typeof document === 'undefined') return null;
+
+    return createPortal(
+      <div
+        ref={calendarRef}
+        onMouseDown={(e) => e.stopPropagation()}
+        className="p-4 bg-white rounded-xl shadow-xl border border-gray-100 min-w-[280px] animate-in fade-in zoom-in-95 duration-200"
+        style={{
+          position: 'fixed',
+          top: calendarPosition.top,
+          left: calendarPosition.left,
+          width: `${CALENDAR_WIDTH}px`,
+          zIndex: 9999,
+          transform: calendarPosition.openUp ? 'translateY(-100%)' : 'none'
+        }}
+      >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-0.5">
             <button
@@ -184,16 +244,22 @@ const DateInput: React.FC<InputProps> = ({
         <div className="grid grid-cols-7 gap-1">
           {days}
         </div>
-      </div>
+      </div>,
+      document.body
     );
   };
 
   return (
-    <div className={`flex flex-col gap-1.5 ${props.fullWidth ? 'col-span-2' : 'col-span-1'}`} ref={containerRef}>
-      <label className="text-sm font-medium text-gray-700 ml-1">
-        {label}
-      </label>
-      <div className="relative group">
+    <div
+      className={`flex flex-col ${label ? 'gap-1.5' : 'gap-0'} ${props.fullWidth ? 'col-span-2' : 'col-span-1'}`}
+      ref={containerRef}
+    >
+      {label ? (
+        <label className="text-sm font-medium text-gray-700 ml-1">
+          {label}
+        </label>
+      ) : null}
+      <div className="relative group" ref={triggerRef}>
         <button
           type="button"
           onClick={() => setShowCalendar(!showCalendar)}

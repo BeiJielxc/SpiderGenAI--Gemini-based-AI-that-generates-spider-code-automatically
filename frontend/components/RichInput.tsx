@@ -47,9 +47,9 @@ const RichInput: React.FC<RichInputProps> = ({
   // 处理文件选择（转换为带 base64 的 Attachment）
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const files = Array.from(e.target.files);
+      const files = Array.from(e.target.files) as File[];
       const attachments: Attachment[] = await Promise.all(
-        files.map(async (file) => {
+        files.map(async (file: File): Promise<Attachment> => {
           // 只对图片进行 base64 编码
           if (file.type.startsWith('image/')) {
             const base64 = await fileToBase64(file);
@@ -64,8 +64,8 @@ const RichInput: React.FC<RichInputProps> = ({
   };
 
   // 处理粘贴事件（支持从剪贴板粘贴图片）
-  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
-    const items = e.clipboardData?.items;
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items as DataTransferItemList | undefined;
     if (!items) return;
 
     const imageFiles: Attachment[] = [];

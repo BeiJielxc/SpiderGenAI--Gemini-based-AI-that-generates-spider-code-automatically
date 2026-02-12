@@ -1112,15 +1112,30 @@ def fetch_data():
 
 ## 技术选型策略
 
-### 【硬约束】平台兼容性（防崩溃）
+### 【硬约束】平台兼容性与反爬虫（防崩溃/防拦截）
 1. **禁止在 print() 输出中使用 Emoji 表情**（如 🚀, ✅, ❌, ⚠️ 等）。
    - Windows 默认控制台 (GBK) 无法编码这些字符，会导致 `UnicodeEncodeError` 并使程序崩溃。
    - 只能使用标准 ASCII 字符、中文字符或标准标点。
 2. 确保文件编码声明为 `# -*- coding: utf-8 -*-`（模板已包含）。
-3. **【必须】Playwright 无头模式**：
+3. **【必须】Playwright 无头模式与反爬配置**：
    - 如果代码中使用 Playwright，**必须**设置 `headless=True`。
-   - 禁止在测试或运行时弹出浏览器窗口。
-   - `browser = p.chromium.launch(headless=True)`
+   - **必须**添加 `--disable-blink-features=AutomationControlled` 启动参数。
+   - **必须**在 context 中设置标准的 User-Agent。
+   - **【反爬兜底】必须尝试应用 playwright-stealth**：
+     ```python
+     # 必须包含此导入逻辑
+     try:
+         from playwright_stealth import stealth_sync
+     except ImportError:
+         stealth_sync = None
+     
+     # ... page 创建后 ...
+     if stealth_sync:
+         try:
+             stealth_sync(page)
+         except: pass
+     ```
+   - 在 `page.goto` 后，**必须**添加随机等待或显式等待（如 `page.wait_for_timeout(3000)`）。
 
 ### 【硬约束】优先级规则（必须严格遵守）
 
@@ -1336,6 +1351,24 @@ def main():
 - 输出 JSON 的每条记录**必须**使用键名：`name`, `date`, `downloadUrl`, `fileType`
 - 你可以在代码内部用变量名 `title`，但写入结果字典时必须是：`"name": title`
 - **不要**在最终输出的 `reports` 中使用 `"title": ...` 作为字段名（否则前端无法显示名称）
+
+## 【硬约束】Playwright 交互稳定性与反爬（关键）
+
+1. **规避无头模式检测**：
+   - 必须使用 `args=["--disable-blink-features=AutomationControlled"]`。
+   - 必须使用真实浏览器的 User-Agent。
+   - `navigator.webdriver` 必须被屏蔽（Playwright 某些版本会自动处理，但启动参数是必须的）。
+
+2. **元素交互必须健壮**：
+   - **禁止**直接用 `page.click("text=XXX")` 而不检查可见性。
+   - **必须**使用 `locator.wait_for(state="visible", timeout=5000)` 等待元素加载。
+   - 如果要点击菜单，建议优先使用 CSS 选择器定位（因为文本可能包含空格或隐藏字符），或者使用 `get_by_text(..., exact=False)` 进行模糊匹配。
+   - **必须**处理可能的弹窗或遮罩层（虽然无头模式看不见，但确实存在）。
+   - 在 `click()` 前最好先 `hover()`，模拟真实用户行为，有助于触发 JS 事件。
+
+3. **动态加载等待**：
+   - 在 `goto` 或 `click` 后，**必须**显式等待一段时间（如 `page.wait_for_timeout(2000)`）或等待网络空闲。
+   - 不要只依赖 `domcontentloaded`，很多单页应用（SPA）在 DOM 加载后还需要几秒钟渲染数据。
 
 ## 【硬约束】HTML 解析必须健壮（避免 NoneType 崩溃，提升泛化能力）
 
@@ -1577,6 +1610,20 @@ if __name__ == "__main__":
 4. 如果截图中有红框、箭头等标注，那是用户希望爬取的具体区域
 
 ## 技术选型策略
+
+### 【反爬兜底】
+- 如果使用 Playwright，**必须**尝试导入并应用 `playwright-stealth`：
+```python
+try:
+    from playwright_stealth import stealth_sync
+except ImportError:
+    stealth_sync = None
+# ...
+if stealth_sync:
+    try:
+        stealth_sync(page)
+    except: pass
+```
 
 ### 新闻页面一般特点
 - 新闻列表页通常是服务端渲染或有 API 接口
@@ -2441,8 +2488,13 @@ from datetime import datetime
 try:
     from playwright.sync_api import sync_playwright
     HAS_PLAYWRIGHT = True
+    try:
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        stealth_sync = None
 except ImportError:
     HAS_PLAYWRIGHT = False
+    stealth_sync = None
     print("[WARN] Playwright not installed, trying requests...")
     import requests
     from bs4 import BeautifulSoup
@@ -2450,18 +2502,34 @@ except ImportError:
 # Configuration
 BASE_URL = "{page_url}"
 
-def crawl_with_playwright():
+    def crawl_with_playwright():
     """使用 Playwright 爬取动态页面"""
     articles = []
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
         
+        # 应用反爬兜底
+        if stealth_sync:
+            try:
+                stealth_sync(page)
+            except: pass
+
         try:
             page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(3000)  # 等待动态内容加载
             
+            # 尝试绕过 WAF (简单滚动)
+            page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            page.wait_for_timeout(2000)
+
             # 尝试多种常见的新闻列表选择器
             selectors = [
                 'ul li a', '.news-list a', '.article-list a',

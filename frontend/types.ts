@@ -22,6 +22,25 @@ export interface CrawlerFormData {
   attachments: Attachment[];
 }
 
+// ============ Batch Types ============
+export type BatchStatus = 'pending' | 'running' | 'success' | 'failed';
+
+export interface BatchJob extends CrawlerFormData {
+  id: string;
+  status: BatchStatus;
+  logs: string[];
+  taskId?: string;
+  resultFile?: string;
+  error?: string;
+  selectedPaths?: string[];
+  rawStatus?: 'pending' | 'queued' | 'running' | 'completed' | 'failed';
+  reports?: ReportFile[];
+  newsArticles?: NewsArticle[];
+  downloadedCount?: number;
+  filesNotEnough?: boolean;
+  pdfOutputDir?: string;
+}
+
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label: string;
   icon?: React.ReactNode;

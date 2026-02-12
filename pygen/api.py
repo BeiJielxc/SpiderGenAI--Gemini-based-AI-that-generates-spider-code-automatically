@@ -881,16 +881,14 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             script_env = _os_env.environ.copy()
             script_env["PYTHONIOENCODING"] = "utf-8"
             
-            # 运行生成的脚本（使用 Popen 以便可以停止）
-            process = subprocess.Popen(
-                [sys.executable, str(output_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+            # 运行生成的脚本（使用 asyncio.create_subprocess_exec 以免阻塞主线程）
+            # 注意：create_subprocess_exec 不支持 text/encoding 参数，需手动解码
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, str(output_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(output_dir),
-                env=script_env,
-                encoding="utf-8",
-                errors="replace"  # 遇到无法解码的字符时替换，避免崩溃
+                env=script_env
             )
             
             # 存储进程引用以便可以停止
@@ -898,7 +896,11 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             
             try:
                 # 等待进程完成，最多5分钟
-                stdout, stderr = process.communicate(timeout=300)
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=300)
+                
+                # 解码输出
+                stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+                stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
                 
                 if process.returncode == 0:
                     _add_log(task_id, "[SUCCESS] 爬虫脚本运行成功")
@@ -915,10 +917,13 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
                     # 直接终止任务（否则会出现“脚本失败但任务完成”的误导）
                     raise RuntimeError(f"爬虫脚本运行失败（返回码 {process.returncode}）")
                         
-            except subprocess.TimeoutExpired:
+            except asyncio.TimeoutError:
                 _add_log(task_id, "[WARNING] 脚本运行超时（5分钟），正在终止...")
-                process.kill()
-                process.wait()
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
             finally:
                 # 清理进程引用
                 if task_id in task_processes:
@@ -1418,6 +1423,29 @@ async def get_menu_tree(request: MenuTreeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取目录树失败: {str(e)}")
 
+@app.post("/api/rerun/{task_id}")
+async def rerun_task(task_id: str):
+    """
+    重新运行指定任务
+    
+    复用原任务的请求参数，创建一个新任务加入队列
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="原任务不存在")
+    
+    original_task = tasks[task_id]
+    if "request" not in original_task:
+        raise HTTPException(status_code=400, detail="无法重试该任务（原始请求数据丢失）")
+        
+    try:
+        req_data = original_task["request"]
+        # 重建请求对象
+        request = GenerateRequest(**req_data)
+        # 调用生成接口（复用逻辑）
+        return await start_generation(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重试失败: {str(e)}")
+
 @app.post("/api/generate")
 async def start_generation(request: GenerateRequest):
     """
@@ -1438,6 +1466,7 @@ async def start_generation(request: GenerateRequest):
 
     tasks[task_id] = {
         "taskId": task_id,
+        "request": request.model_dump(),
         "status": initial_status,
         "currentStep": 0,
         "totalSteps": 12,  # 增加了代码验证和结果验证步骤

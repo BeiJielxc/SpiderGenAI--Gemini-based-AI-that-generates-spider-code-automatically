@@ -16,7 +16,6 @@
 - [方法与技术亮点 / Highlights](#highlights)
 - [日期控件检测与 API 提取 / Date Detection & API Extraction](#date-detection)
 - [目录结构与核心文件说明 / Structure & Key files](#structure-files)
-- [安全与 GitHub 提交建议 / Security checklist](#security)
 - [常见问题 / Troubleshooting](#troubleshooting)
 
 ---
@@ -47,6 +46,7 @@ This repo provides an end-to-end workflow:
 - **多板块爬取**：支持手动选择目录树（多板块）与自动探测板块  
 - **结果可视化**：前端实时查看日志、下载脚本、查看报告/新闻列表（支持来源板块标记）  
 - **可复用登录态**：使用 `cdp.user_data_dir` 保存 Chrome Profile，支持需要登录的网站（手动登录一次即可复用）
+- **批量任务管理**：支持批量导入任务、队列并发控制与实时状态监控（SSE）
 
 Generates runnable Python crawlers, supports multi-category crawling, visualizes execution logs/results, and can reuse Chrome login state via a persistent profile directory.
 
@@ -208,6 +208,8 @@ npm run dev
 
 ### 基本流程 (Basic flow)
 
+> **批量爬取 (Batch Mode)**：点击首页右上角“批量报告爬取”按钮，可进入批量任务配置与监控界面。
+
 1. 选择**运行模式**（企业报告下载 / 新闻报告下载 / 新闻舆情爬取）
 2. 选择**爬取模式**
    - **单一板块爬取**：直接执行
@@ -227,7 +229,7 @@ npm run dev
 - 企业/新闻报告：展示报告列表；多板块模式下会额外显示“来源板块”
 - 新闻舆情：展示文章列表与详情；多板块模式下同样显示“来源板块”
 
-### 界面截图 (UI screenshots)
+### 界面演示 (UI presentation)
 
 > 提示：以下为 `pic/` 目录内的 GIF 演示图，便于快速了解前端交互流程。  
 > Tip: The following GIFs are stored under `pic/` for a quick UI walkthrough.
@@ -259,6 +261,13 @@ npm run dev
 
 - **说明**：查看任务日志、进度与文章列表/详情；多板块时可标记来源板块。  
 - **Note**: Monitor logs/progress and inspect article list/details; categories are labeled in multi-category mode.
+
+#### 5) 批量爬取界面 (Batch Crawling Interface)
+
+![批量爬取界面 - 配置与监控 / Batch Crawl Interface - Config & Monitor](pic/PLPAGE.gif)
+
+- **说明**：支持手动配置批量任务，实时监控队列状态、查看任务日志与结果（成功/失败/重试）。  
+- **Note**: Configure batch tasks, monitor queue status, logs, and results (success/failure/retry).
 
 ---
 
@@ -422,6 +431,8 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 - `pygen/post_processor.py`：生成后后处理（注入日期、分类映射、输出兜底等）
 - `pygen/validator.py`：生成代码的基础校验（syntax / heuristics）
 - `pygen/signals_collector.py`：采集页面信号（结构、请求等）用于提示词/决策
+- `pygen/queue_manager.py`：**任务队列管理器**（Task queue manager，支持并发控制与任务调度）
+- `pygen/realtime.py`：**SSE 实时推送**（Server-Sent Events，负责日志与状态的实时前端同步）
 - `pygen/date_api_extractor.py`：**日期 API 四层提取器**（Layer 0~3 渐进检测、日期控件自动操作、API 验证与重放）
 - `pygen/deterministic_templates.py`：**确定性脚本模板生成器**（字段映射自适应 + LLM 完形填空 + 纯模板渲染，不调用 LLM）
 - `pygen/date_extractor.py`：日期相关辅助逻辑
@@ -439,12 +450,16 @@ Layer 2 的 `_safe_fill()` 采用三级递进策略，兼容各类日期控件�
 - `frontend/types.ts`：前端类型定义 + `API_BASE_URL`（默认 `http://localhost:8000`）
 - `frontend/components/ExecutionView.tsx`：执行页（启动任务、轮询状态、展示日志/结果、下载脚本/PDF）
 - `frontend/components/TreeSelectionView.tsx`：多板块手动选择目录树（`/api/menu-tree`）
+- `frontend/components/BatchConfigView.tsx`：**批量任务配置页**（Batch task configuration，支持批量导入/表单配置）
+- `frontend/components/BatchExecutionView.tsx`：**批量任务执行监控页**（Batch task execution monitor，实时查看队列状态与结果）
 - `frontend/components/RichInput.tsx`：额外需求输入 + 附件上传 UI
 - `frontend/components/SelectInput.tsx` / `DateInput.tsx` / `FormInput.tsx`：通用表单组件
 - `frontend/package.json` / `package-lock.json`：前端依赖与脚本
 - `frontend/vite.config.ts` / `tsconfig.json`：构建与 TS 配置
 - `frontend/metadata.json`：项目元信息（非关键）
 - `frontend/.gitignore` / `frontend/README.md`：前端子模块忽略与说明
+
+---
 
 <a id="troubleshooting"></a>
 ## 常见问题 (Troubleshooting)

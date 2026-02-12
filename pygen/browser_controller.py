@@ -15,6 +15,12 @@ import hashlib
 from urllib import parse
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
+# 尝试导入 playwright-stealth (反爬兜底)
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    stealth_async = None
+
 
 class BrowserController:
     """增强版浏览器控制器，支持空数据检测和交互探测"""
@@ -70,12 +76,47 @@ class BrowserController:
                 self.context = contexts[0]
             else:
                 self.context = await self.browser.new_context()
+            
+            # 【反爬增强】注入 JS 规避检测（覆盖 navigator.webdriver 等特征）
+            # 虽然启动参数已经禁用 AutomationControlled，但双重保险更稳妥
+            await self.context.add_init_script("""
+                // 覆盖 navigator.webdriver
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                
+                // 模拟 window.chrome (非自动化浏览器通常有这个对象)
+                if (!window.chrome) {
+                    window.chrome = {
+                        runtime: {}
+                    };
+                }
+                
+                // 模拟 navigator.plugins (无头模式通常为空)
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                
+                // 模拟 navigator.languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['zh-CN', 'zh', 'en']
+                });
+            """)
 
             pages = self.context.pages
             if pages:
                 self.page = pages[0]
             else:
                 self.page = await self.context.new_page()
+
+            # 【反爬兜底】应用 playwright-stealth
+            if stealth_async and self.page:
+                try:
+                    await stealth_async(self.page)
+                    print("✓ 已启用 playwright-stealth 反爬增强")
+                except Exception as e:
+                    # 不阻断主流程
+                    print(f"⚠ playwright-stealth 启用失败: {e}")
 
             self.page.set_default_timeout(self.timeout)
             self.page.set_default_navigation_timeout(self.timeout)
@@ -112,6 +153,12 @@ class BrowserController:
                     self.page = pages[0]
                 else:
                     self.page = await self.context.new_page()
+                
+                if stealth_async and self.page:
+                    try:
+                        await stealth_async(self.page)
+                    except: pass
+
                 self.page.set_default_timeout(self.timeout)
                 self.page.set_default_navigation_timeout(self.timeout)
                 self._cdp_enhanced = False
@@ -126,6 +173,12 @@ class BrowserController:
             if self.browser:
                 self.context = await self.browser.new_context()
                 self.page = await self.context.new_page()
+                
+                if stealth_async and self.page:
+                    try:
+                        await stealth_async(self.page)
+                    except: pass
+
                 self.page.set_default_timeout(self.timeout)
                 self.page.set_default_navigation_timeout(self.timeout)
                 self._cdp_enhanced = False

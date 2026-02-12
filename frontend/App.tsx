@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { 
   FileJson, 
   Globe, 
@@ -9,7 +9,8 @@ import {
   Settings2,
   Layers,
   FileDown,
-  ShieldCheck
+  ShieldCheck,
+  FileSpreadsheet
 } from 'lucide-react';
 import FormInput from './components/FormInput';
 import RichInput from './components/RichInput';
@@ -17,10 +18,57 @@ import DateInput from './components/DateInput';
 import SelectInput from './components/SelectInput';
 import ExecutionView from './components/ExecutionView';
 import TreeSelectionView from './components/TreeSelectionView';
-import { CrawlerFormData, Attachment } from './types';
+import BatchConfigView, { BatchConfigData } from './components/BatchConfigView';
+import BatchExecutionView from './components/BatchExecutionView';
+import {
+  API_BASE_URL,
+  Attachment,
+  BatchJob,
+  CrawlerFormData,
+  NewsArticle,
+  ReportFile,
+  TaskStatusResponse
+} from './types';
+
+type BatchExecutionPrefill = {
+  logs: string[];
+  reports: ReportFile[];
+  newsArticles: NewsArticle[];
+  rawStatus?: TaskStatusResponse['status'];
+};
+
+const mapTaskStatusToBatchStatus = (
+  status: TaskStatusResponse['status'] | undefined
+): BatchJob['status'] => {
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'failed';
+  if (status === 'running') return 'running';
+  return 'pending';
+};
+
+const mapBatchStatusToRawStatus = (
+  status: BatchJob['status'] | undefined
+): TaskStatusResponse['status'] => {
+  if (status === 'success') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'running') return 'running';
+  return 'pending';
+};
+
+const mergeBatchJobPreferDefined = (base: BatchJob, patch: Partial<BatchJob>): BatchJob => {
+  const merged: BatchJob = { ...base };
+  (Object.keys(patch) as Array<keyof BatchJob>).forEach((key) => {
+    const value = patch[key];
+    if (value !== undefined) {
+      (merged as any)[key] = value;
+    }
+  });
+  return merged;
+};
 
 const App: React.FC = () => {
-  const [view, setView] = useState<'form' | 'tree-selection' | 'execution'>('form');
+  const [view, setView] = useState<'form' | 'tree-selection' | 'execution' | 'batch-config' | 'batch-execution'>('form');
+  const [executionViewSeed, setExecutionViewSeed] = useState(0);
   const [formData, setFormData] = useState<CrawlerFormData>({
     startDate: '2026-01-01',
     endDate: '2026-12-31',
@@ -41,6 +89,9 @@ const App: React.FC = () => {
   
   // 当前任务 ID（用于 ExecutionView 轮询状态）
   const [taskId, setTaskId] = useState<string>('');
+  const [batchJobs, setBatchJobs] = useState<BatchJob[]>([]);
+  const [isFromBatchExecution, setIsFromBatchExecution] = useState(false);
+  const [batchExecutionPrefill, setBatchExecutionPrefill] = useState<BatchExecutionPrefill | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -114,6 +165,8 @@ const App: React.FC = () => {
     }
 
     setIsSubmitting(true);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
     
     // 根据模式决定下一步
     setTimeout(() => {
@@ -145,18 +198,112 @@ const App: React.FC = () => {
     setView('form');
     setTaskId('');
     setSelectedPaths([]);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
   };
 
   // TreeSelectionView 完成选择后回调
   const handleTreeSelectionComplete = (paths: string[], newTaskId: string) => {
     setSelectedPaths(paths);
     setTaskId(newTaskId);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
+    setExecutionViewSeed((s) => s + 1);
     setView('execution');
   };
 
   // 单页模式直接生成时的 taskId 回调
   const handleExecutionStart = (newTaskId: string) => {
     setTaskId(newTaskId);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
+  };
+
+  const handleBatchSubmit = (data: BatchConfigData) => {
+    const jobs: BatchJob[] = data.rows.map((row, index) => ({
+      ...row,
+      id: `batch_${Date.now()}_${index}`,
+      status: 'pending',
+      rawStatus: 'pending',
+      logs: []
+    }));
+
+    setBatchJobs(jobs);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
+    setTaskId('');
+    setSelectedPaths([]);
+    setView('batch-execution');
+  };
+
+  const handleBatchJobsChange = useCallback((jobs: BatchJob[]) => {
+    setBatchJobs(jobs);
+  }, []);
+
+  const handleViewBatchResult = async (job: BatchJob) => {
+    const latestFromStore = batchJobs.find((item) => item.id === job.id);
+    let mergedJob = latestFromStore
+      ? mergeBatchJobPreferDefined(latestFromStore, job)
+      : job;
+    if (!mergedJob.taskId && latestFromStore?.taskId) {
+      mergedJob = { ...mergedJob, taskId: latestFromStore.taskId };
+    }
+    const resolvedTaskId = mergedJob.taskId || '';
+
+    if (!resolvedTaskId) {
+      alert('该任务暂无 taskId，无法查看执行结果。请回到批量监控页稍后重试。');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/status/${resolvedTaskId}`);
+      if (response.ok) {
+        const statusData: TaskStatusResponse = await response.json();
+        mergedJob = mergeBatchJobPreferDefined(mergedJob, {
+          rawStatus: statusData.status,
+          status: mapTaskStatusToBatchStatus(statusData.status),
+          logs: statusData.logs?.length ? statusData.logs : mergedJob.logs,
+          resultFile: statusData.resultFile,
+          error: statusData.error,
+          reports: statusData.reports,
+          newsArticles: statusData.newsArticles,
+          downloadedCount: statusData.downloadedCount,
+          filesNotEnough: statusData.filesNotEnough,
+          pdfOutputDir: statusData.pdfOutputDir
+        });
+      }
+    } catch (error) {
+      console.warn('hydrate batch result before navigation failed', error);
+    }
+
+    setBatchJobs((prev) =>
+      prev.map((item) => (item.id === mergedJob.id ? { ...item, ...mergedJob } : item))
+    );
+    setBatchExecutionPrefill({
+      logs: mergedJob.logs || [],
+      reports: mergedJob.reports || [],
+      newsArticles: mergedJob.newsArticles || [],
+      rawStatus: mergedJob.rawStatus || mapBatchStatusToRawStatus(mergedJob.status)
+    });
+    setFormData({
+      startDate: mergedJob.startDate,
+      endDate: mergedJob.endDate,
+      extraRequirements: mergedJob.extraRequirements,
+      siteName: mergedJob.siteName,
+      listPageName: mergedJob.listPageName,
+      sourceCredibility: mergedJob.sourceCredibility,
+      reportUrl: mergedJob.reportUrl,
+      outputScriptName: mergedJob.outputScriptName,
+      runMode: mergedJob.runMode,
+      crawlMode: mergedJob.crawlMode,
+      downloadReport: mergedJob.downloadReport,
+      attachments: mergedJob.attachments
+    });
+    setSelectedPaths(mergedJob.selectedPaths || []);
+    setTaskId(resolvedTaskId);
+    setIsFromBatchExecution(true);
+    setExecutionViewSeed((s) => s + 1);
+    setView('execution');
   };
 
   return (
@@ -165,12 +312,24 @@ const App: React.FC = () => {
       
       {view === 'execution' ? (
         <ExecutionView 
+          key={`execution-${executionViewSeed}-${isFromBatchExecution ? 'batch' : 'single'}-${taskId || 'new'}`}
           mode={formData.runMode} 
           formData={formData}
           selectedPaths={selectedPaths}
           taskId={taskId}
+          initialLogLines={isFromBatchExecution ? batchExecutionPrefill?.logs : undefined}
+          initialReports={isFromBatchExecution ? batchExecutionPrefill?.reports : undefined}
+          initialNewsArticles={isFromBatchExecution ? batchExecutionPrefill?.newsArticles : undefined}
+          initialRawStatus={isFromBatchExecution ? batchExecutionPrefill?.rawStatus : undefined}
+          disableAutoStart={isFromBatchExecution}
           onTaskIdChange={handleExecutionStart}
-          onBack={handleBackToForm} 
+          onBack={() => {
+            if (isFromBatchExecution) {
+              setView('batch-execution');
+              return;
+            }
+            handleBackToForm();
+          }} 
         />
       ) : view === 'tree-selection' ? (
         <TreeSelectionView 
@@ -178,6 +337,18 @@ const App: React.FC = () => {
           formData={formData}
           onGenerate={handleTreeSelectionComplete}
           onBack={handleBackToForm}
+        />
+      ) : view === 'batch-config' ? (
+        <BatchConfigView
+          onBack={handleBackToForm}
+          onSubmit={handleBatchSubmit}
+        />
+      ) : view === 'batch-execution' ? (
+        <BatchExecutionView
+          initialJobs={batchJobs}
+          onBack={() => setView('batch-config')}
+          onViewResult={handleViewBatchResult}
+          onJobsChange={handleBatchJobsChange}
         />
       ) : (
         // Form view acts as a scrollable full page without floating card margins
@@ -200,6 +371,21 @@ const App: React.FC = () => {
                     配置您的爬虫参数以生成自动化脚本
                   </p>
                 </div>
+              </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFromBatchExecution(false);
+                    setBatchExecutionPrefill(null);
+                    setView('batch-config');
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors"
+                >
+                  <FileSpreadsheet size={16} />
+                  批量报告爬取
+                </button>
               </div>
 
               {/* Form Section */}
@@ -343,7 +529,7 @@ const App: React.FC = () => {
                       options={[
                         { value: 'single_page', label: '单一板块爬取' },
                         { value: 'multi_page', label: '多板块爬取 (手动选目录树+抓包映射)' },
-                        { value: 'auto_detect', label: '自动探测板块并爬取 (通用交互探测)' },
+                        { value: 'auto_detect', label: '自动探测板块并爬取 (必须提供含有框选板块的截图)' },
                         { value: 'date_range_api', label: '日期筛选类网站爬取 (API直连+自校准)' }
                       ]}
                     />

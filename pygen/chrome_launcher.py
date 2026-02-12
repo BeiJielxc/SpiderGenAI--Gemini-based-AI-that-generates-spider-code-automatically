@@ -162,10 +162,16 @@ class ChromeLauncher:
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-infobars",
+            "--excludeSwitches=enable-automation",
+            "--use-mock-keychain",
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ]
         
         if self.headless:
-            args.extend(["--headless", "--disable-gpu"])
+            # 尝试使用新版无头模式 (Chrome 109+)，隐匿性更好
+            # 如果是极老版本 Chrome，可能会报错，则回退到 --headless
+            args.extend(["--headless=new", "--disable-gpu", "--hide-scrollbars"])
         
         # Linux 服务器常见兼容参数（root 用户或容器环境需要 --no-sandbox）
         if platform.system() == "Linux":

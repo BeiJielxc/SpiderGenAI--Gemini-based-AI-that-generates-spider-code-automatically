@@ -31,6 +31,11 @@ interface ExecutionViewProps {
   formData: CrawlerFormData;
   selectedPaths: string[];
   taskId: string;
+  initialLogLines?: string[];
+  initialReports?: ReportFile[];
+  initialNewsArticles?: NewsArticle[];
+  initialRawStatus?: TaskStatusResponse['status'];
+  disableAutoStart?: boolean;
   onTaskIdChange: (taskId: string) => void;
   onBack: () => void;
 }
@@ -60,6 +65,11 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   formData, 
   selectedPaths, 
   taskId: initialTaskId,
+  initialLogLines,
+  initialReports,
+  initialNewsArticles,
+  initialRawStatus,
+  disableAutoStart = false,
   onTaskIdChange,
   onBack 
 }) => {
@@ -72,15 +82,23 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
     }))
   );
   
-  const [logContent, setLogContent] = useState<string>("");
-  const [taskStatus, setTaskStatus] = useState<'pending' | 'queued' | 'running' | 'completed' | 'failed'>('pending');
+  const [logContent, setLogContent] = useState<string>(
+    initialLogLines && initialLogLines.length > 0 ? initialLogLines.join('\n') : ""
+  );
+  const [taskStatus, setTaskStatus] = useState<'pending' | 'queued' | 'running' | 'completed' | 'failed'>(
+    initialRawStatus || 'pending'
+  );
   const [resultFile, setResultFile] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
-  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
+  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>(initialNewsArticles || []);
   
   // Report List State
-  const [reports, setReports] = useState<ReportFile[]>([]);
-  const [loadingReports, setLoadingReports] = useState(false);
+  const [reports, setReports] = useState<ReportFile[]>(initialReports || []);
+  const [loadingReports, setLoadingReports] = useState(
+    Boolean(initialTaskId) &&
+      (mode === 'enterprise_report' || mode === 'news_report_download') &&
+      !((initialReports || []).length > 0)
+  );
   const [reportSearch, setReportSearch] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 20;
@@ -109,6 +127,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   const logScrollRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const prevInitialTaskIdRef = useRef(initialTaskId);
 
   const isEnterprise = mode === 'enterprise_report';
   const isNewsReport = mode === 'news_report_download';
@@ -116,6 +135,45 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   const isReportMode = isEnterprise || isNewsReport;
   
   const title = isEnterprise ? '企业报告下载' : (isNewsReport ? '新闻报告下载' : '新闻舆情爬取');
+
+  useEffect(() => {
+    if (prevInitialTaskIdRef.current === initialTaskId) return;
+    prevInitialTaskIdRef.current = initialTaskId;
+
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+
+    setTaskId(initialTaskId);
+    setTaskStatus(initialRawStatus || 'pending');
+    setLogContent(initialLogLines && initialLogLines.length > 0 ? initialLogLines.join('\n') : '');
+    setErrorMsg('');
+    setResultFile('');
+    setNewsArticles(initialNewsArticles || []);
+    setReports(initialReports || []);
+    setLoadingReports(Boolean(initialTaskId) && isReportMode && !((initialReports || []).length > 0));
+    setReportSearch('');
+    setCurrentPage(1);
+    setDownloadedCount(0);
+    setFilesNotEnough(false);
+    setPdfOutputDir('');
+    setSelectedReportIds(new Set());
+    setIsStopping(false);
+    setHasMoreReports(false);
+    setTotalReportsCount(0);
+    setQueuePosition(0);
+    setQueueWaiting(0);
+    setQueueRunning(0);
+    setEstimatedWait(0);
+    setSteps(
+      STEPS_TEMPLATE.map((label, index) => ({
+        id: index,
+        label,
+        status: 'pending'
+      }))
+    );
+  }, [initialTaskId, initialRawStatus, initialLogLines, initialNewsArticles, initialReports, isReportMode]);
 
   // 启动任务（使用 ref 防止 React Strict Mode 导致的重复请求）
   const isStartingRef = useRef(false);
@@ -210,18 +268,21 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
       }
       
       // 更新报告列表（企业报告场景 / 新闻报告场景）
-      if (data.reports && data.reports.length > 0) {
-        setReports(data.reports);
+      if (data.reports !== undefined) {
+        const nextReports = data.reports || [];
+        setReports(nextReports);
         setLoadingReports(false);
         
         // 检查是否有截断（后端截断后会返回 totalCount）
-        if (data.totalCount && data.totalCount > data.reports.length) {
+        if (data.totalCount && data.totalCount > nextReports.length) {
           setHasMoreReports(true);
           setTotalReportsCount(data.totalCount);
         } else {
           setHasMoreReports(false);
-          setTotalReportsCount(data.reports.length);
+          setTotalReportsCount(nextReports.length);
         }
+      } else if (data.status === 'completed' && isReportMode) {
+        setLoadingReports(false);
       }
       
       // 更新 PDF 下载状态
@@ -291,18 +352,26 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
     } catch (err: any) {
       console.error('Poll error:', err);
     }
-  }, [taskId, isEnterprise]);
+  }, [taskId, isEnterprise, isReportMode]);
 
   // 组件挂载时启动任务
   useEffect(() => {
+    if (disableAutoStart) return;
     startTask();
-  }, [startTask]);
+  }, [disableAutoStart, startTask]);
+
+  useEffect(() => {
+    if (!disableAutoStart) return;
+    if (taskId) return;
+    setLoadingReports(false);
+    setErrorMsg('任务ID缺失，无法加载历史执行结果，请返回批量监控后重试。');
+  }, [disableAutoStart, taskId]);
 
   // 有 taskId 后开始轮询
   useEffect(() => {
     if (!taskId) return;
     
-    if (isReportMode) {
+    if (isReportMode && reports.length === 0) {
       setLoadingReports(true);
     }
     
@@ -316,7 +385,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
         pollingRef.current = null;
       }
     };
-  }, [taskId, pollStatus, isReportMode]);
+  }, [taskId, pollStatus, isReportMode, reports.length]);
 
   // Auto-scroll logs
   useEffect(() => {
