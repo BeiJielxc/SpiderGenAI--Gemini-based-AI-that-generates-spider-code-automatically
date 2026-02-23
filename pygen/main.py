@@ -66,7 +66,7 @@ def _match_path(pattern: str, path: str) -> bool:
 
 def _parse_menu_select(requirements: str) -> dict:
     """
-    从“额外需求”中解析 menu_select 规则（推荐 JSON/YAML-like）。
+    从“任务目标”中解析 menu_select 规则（推荐 JSON/YAML-like）。
     支持：
       - JSON：{"menu_select":{"include":[...],"exclude":[...]}}
       - 简化文本：
@@ -437,12 +437,12 @@ def get_user_input() -> dict:
         start_date = input("开始时间 [2026-01-01]: ") or "2026-01-01"
         end_date = input("结束时间 [2026-12-31]: ") or "2026-12-31"
 
-    # 额外需求（可选）
+    # 任务目标（可选）
     console.print("\n[dim]可选：描述你想要爬取的具体内容（留空则自动分析）[/dim]")
     if RICH_AVAILABLE:
-        requirements = Prompt.ask("[cyan]额外需求[/cyan]", default="")
+        requirements = Prompt.ask("[cyan]任务目标[/cyan]", default="")
     else:
-        requirements = input("额外需求（可选）: ")
+        requirements = input("任务目标（可选）: ")
 
     # 输出文件名
     if RICH_AVAILABLE:
@@ -566,7 +566,7 @@ async def run_generation(
             console.print("[green]✓ 已完成目录树枚举（按需选择后可再生成脚本）[/green]")
             return True
 
-        # Step 2: 解析选择规则（额外需求 + CLI）
+        # Step 2: 解析选择规则（任务目标 + CLI）
         req_rules = _parse_menu_select(requirements)
         include_all = (include_rules or []) + req_rules.get("include", [])
         exclude_all = (exclude_rules or []) + req_rules.get("exclude", [])
@@ -728,7 +728,7 @@ async def main():
         parser.add_argument("url", nargs="?", help="目标列表页URL")
         parser.add_argument("start_date", nargs="?", default="2026-01-01", help="开始日期 YYYY-MM-DD")
         parser.add_argument("end_date", nargs="?", default="2026-12-31", help="结束日期 YYYY-MM-DD")
-        parser.add_argument("--requirements", default="", help="额外需求（可选）")
+        parser.add_argument("--requirements", default="", help="任务目标（可选）")
         parser.add_argument("--output", default="crawler.py", help="输出脚本文件名（默认 crawler.py）")
         parser.add_argument("--include", action="append", default=[], help="菜单选择 include 规则（可重复）")
         parser.add_argument("--exclude", action="append", default=[], help="菜单选择 exclude 规则（可重复）")
@@ -766,7 +766,7 @@ async def main():
 
 🌐 目标URL：[cyan]{user_input['url']}[/cyan]
 📅 时间范围：[cyan]{user_input['start_date']} ~ {user_input['end_date']}[/cyan]
-📝 额外需求：[cyan]{user_input['requirements'] or '（无）'}[/cyan]
+📝 任务目标：[cyan]{user_input['requirements'] or '（无）'}[/cyan]
 📄 输出文件：[cyan]{user_input['output_name']}[/cyan]
 """,
                 title="[bold cyan]PyGen[/bold cyan]",
@@ -776,7 +776,7 @@ async def main():
             print("\n" + "-" * 50)
             print(f"目标URL: {user_input['url']}")
             print(f"时间范围: {user_input['start_date']} ~ {user_input['end_date']}")
-            print(f"额外需求: {user_input['requirements'] or '（无）'}")
+            print(f"任务目标: {user_input['requirements'] or '（无）'}")
             print(f"输出文件: {user_input['output_name']}")
             print("-" * 50)
 

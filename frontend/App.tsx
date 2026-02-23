@@ -1,4 +1,5 @@
 import React, { useCallback, useState } from 'react';
+import HistoryView from './components/HistoryView';
 import { 
   FileJson, 
   Globe, 
@@ -7,10 +8,10 @@ import {
   Terminal, 
   Bot,
   Settings2,
-  Layers,
   FileDown,
   ShieldCheck,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Clock // Added Clock icon
 } from 'lucide-react';
 import FormInput from './components/FormInput';
 import RichInput from './components/RichInput';
@@ -25,6 +26,7 @@ import {
   Attachment,
   BatchJob,
   CrawlerFormData,
+  HistoryItem, // Added HistoryItem
   NewsArticle,
   ReportFile,
   TaskStatusResponse
@@ -66,23 +68,81 @@ const mergeBatchJobPreferDefined = (base: BatchJob, patch: Partial<BatchJob>): B
   return merged;
 };
 
-const App: React.FC = () => {
-  const [view, setView] = useState<'form' | 'tree-selection' | 'execution' | 'batch-config' | 'batch-execution'>('form');
-  const [executionViewSeed, setExecutionViewSeed] = useState(0);
-  const [formData, setFormData] = useState<CrawlerFormData>({
-    startDate: '2026-01-01',
-    endDate: '2026-12-31',
-    extraRequirements: '',
-    siteName: '',
-    listPageName: '',
-    sourceCredibility: '',
-    reportUrl: '',
-    outputScriptName: '',
-    runMode: '',
-    crawlMode: '',
-    downloadReport: '',
-    attachments: []
+const DEFAULT_FORM_DATA: CrawlerFormData = {
+  startDate: '2026-01-01',
+  endDate: '2026-12-31',
+  taskObjective: '',
+  siteName: '',
+  listPageName: '',
+  sourceCredibility: '',
+  reportUrl: '',
+  outputScriptName: '',
+  runMode: '',
+  crawlMode: 'agent',
+  downloadReport: '',
+  attachments: []
+};
+
+const normalizeAttachments = (attachments: unknown): Attachment[] => {
+  if (!Array.isArray(attachments)) return [];
+  return attachments.filter((att): att is Attachment => {
+    return Boolean(att && (att as Attachment).file && typeof (att as Attachment).file.name === 'string');
   });
+};
+
+const normalizeFormData = (input: Partial<CrawlerFormData> | null | undefined): CrawlerFormData => {
+  const data: any = input || {};
+  return {
+    startDate: typeof data.startDate === 'string' && data.startDate ? data.startDate : DEFAULT_FORM_DATA.startDate,
+    endDate: typeof data.endDate === 'string' && data.endDate ? data.endDate : DEFAULT_FORM_DATA.endDate,
+    taskObjective:
+      (typeof data.taskObjective === 'string' && data.taskObjective) ||
+      (typeof data.extraRequirements === 'string' && data.extraRequirements) ||
+      '',
+    siteName: typeof data.siteName === 'string' ? data.siteName : '',
+    listPageName: typeof data.listPageName === 'string' ? data.listPageName : '',
+    sourceCredibility: typeof data.sourceCredibility === 'string' ? data.sourceCredibility : '',
+    reportUrl: typeof data.reportUrl === 'string' ? data.reportUrl : '',
+    outputScriptName: typeof data.outputScriptName === 'string' ? data.outputScriptName : '',
+    runMode: typeof data.runMode === 'string' ? data.runMode : '',
+    crawlMode: typeof data.crawlMode === 'string' && data.crawlMode ? data.crawlMode : 'agent',
+    downloadReport: typeof data.downloadReport === 'string' ? data.downloadReport : '',
+    attachments: normalizeAttachments(data.attachments)
+  };
+};
+
+const App: React.FC = () => {
+  const [view, setView] = useState<'form' | 'tree-selection' | 'execution' | 'batch-config' | 'batch-execution' | 'history'>('form');
+  const [executionBackTarget, setExecutionBackTarget] = useState<'form' | 'history' | 'batch-execution'>('form');
+  const [executionViewSeed, setExecutionViewSeed] = useState(0);
+  const [currentBatchSessionId, setCurrentBatchSessionId] = useState<string>('');
+  
+  // Helper to log batch history
+  const logBatchHistory = async (id: string, jobs: BatchJob[]) => {
+    try {
+      // Determine overall status
+      const allCompleted = jobs.every(j => j.status === 'success' || j.status === 'failed');
+      const anyFailed = jobs.some(j => j.status === 'failed');
+      const status = allCompleted ? (anyFailed ? 'failed' : 'completed') : 'running';
+      
+      await fetch(`${API_BASE_URL}/api/history/log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id,
+          taskType: 'batch',
+          status,
+          config: jobs, // Use jobs as config/result for batch
+          result: jobs,
+          logs: []
+        })
+      });
+    } catch (err) {
+      console.warn('Failed to log batch history:', err);
+    }
+  };
+
+  const [formData, setFormData] = useState<CrawlerFormData>(DEFAULT_FORM_DATA);
 
   // 用户在 TreeSelectionView 选中的目录路径
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -134,10 +194,12 @@ const App: React.FC = () => {
       return;
     }
 
-    if (!formData.crawlMode) {
-      alert('请选择爬取模式');
+    if (!formData.taskObjective || !formData.taskObjective.trim()) {
+      alert('请输入任务目标');
       return;
     }
+
+    // crawlMode 已废弃，统一使用 agent 模式
 
     if (!formData.downloadReport) {
       alert('请选择是否下载文件');
@@ -154,34 +216,18 @@ const App: React.FC = () => {
       return;
     }
 
-    // 自动探测模式必须提供额外需求（附件或文字说明）
-    if (formData.crawlMode === 'auto_detect') {
-      const hasAttachments = formData.attachments && formData.attachments.length > 0;
-      const hasExtraText = formData.extraRequirements && formData.extraRequirements.trim().length > 0;
-      if (!hasAttachments && !hasExtraText) {
-        alert('请在额外需求中给出爬取区域说明（例如有框选爬取区域的图片）');
-        return;
-      }
-    }
-
     setIsSubmitting(true);
     setIsFromBatchExecution(false);
     setBatchExecutionPrefill(null);
+    setExecutionBackTarget('form');
     
-    // 根据模式决定下一步
+    // Agent 模式：直接进入执行页（Planner 自主决策，不再需要手动选目录）
     setTimeout(() => {
-      // 延迟重置状态，防止短时间内重复点击
       setTimeout(() => {
         setIsSubmitting(false);
-      }, 2000); // 2秒冷却时间
+      }, 2000);
       
-      if (formData.crawlMode === 'multi_page') {
-        // 多板块爬取：先进入目录选择页（所有运行模式都支持）
-        setView('tree-selection');
-      } else {
-        // 其他情况：直接进入执行页（单页爬取/自动探测不需要选择目录）
-        setView('execution');
-      }
+      setView('execution');
     }, 300);
   };
 
@@ -195,7 +241,9 @@ const App: React.FC = () => {
   };
 
   const handleBackToForm = () => {
+    setFormData((prev) => normalizeFormData(prev));
     setView('form');
+    setExecutionBackTarget('form');
     setTaskId('');
     setSelectedPaths([]);
     setIsFromBatchExecution(false);
@@ -208,6 +256,7 @@ const App: React.FC = () => {
     setTaskId(newTaskId);
     setIsFromBatchExecution(false);
     setBatchExecutionPrefill(null);
+    setExecutionBackTarget('form');
     setExecutionViewSeed((s) => s + 1);
     setView('execution');
   };
@@ -220,25 +269,33 @@ const App: React.FC = () => {
   };
 
   const handleBatchSubmit = (data: BatchConfigData) => {
+    const sessionId = `batch_${Date.now()}`;
     const jobs: BatchJob[] = data.rows.map((row, index) => ({
       ...row,
-      id: `batch_${Date.now()}_${index}`,
+      id: `${sessionId}_${index}`,
       status: 'pending',
       rawStatus: 'pending',
       logs: []
     }));
 
     setBatchJobs(jobs);
+    setCurrentBatchSessionId(sessionId);
     setIsFromBatchExecution(false);
     setBatchExecutionPrefill(null);
     setTaskId('');
     setSelectedPaths([]);
     setView('batch-execution');
+    
+    // Log initial batch history
+    logBatchHistory(sessionId, jobs);
   };
 
   const handleBatchJobsChange = useCallback((jobs: BatchJob[]) => {
     setBatchJobs(jobs);
-  }, []);
+    if (currentBatchSessionId) {
+      logBatchHistory(currentBatchSessionId, jobs);
+    }
+  }, [currentBatchSessionId]);
 
   const handleViewBatchResult = async (job: BatchJob) => {
     const latestFromStore = batchJobs.find((item) => item.id === job.id);
@@ -285,10 +342,10 @@ const App: React.FC = () => {
       newsArticles: mergedJob.newsArticles || [],
       rawStatus: mergedJob.rawStatus || mapBatchStatusToRawStatus(mergedJob.status)
     });
-    setFormData({
+    setFormData(normalizeFormData({
       startDate: mergedJob.startDate,
       endDate: mergedJob.endDate,
-      extraRequirements: mergedJob.extraRequirements,
+      taskObjective: mergedJob.taskObjective || mergedJob.extraRequirements || '',
       siteName: mergedJob.siteName,
       listPageName: mergedJob.listPageName,
       sourceCredibility: mergedJob.sourceCredibility,
@@ -298,19 +355,52 @@ const App: React.FC = () => {
       crawlMode: mergedJob.crawlMode,
       downloadReport: mergedJob.downloadReport,
       attachments: mergedJob.attachments
-    });
+    }));
     setSelectedPaths(mergedJob.selectedPaths || []);
     setTaskId(resolvedTaskId);
     setIsFromBatchExecution(true);
+    setExecutionBackTarget('batch-execution');
     setExecutionViewSeed((s) => s + 1);
     setView('execution');
+  };
+
+  const handleRerunFromHistory = (config: CrawlerFormData) => {
+    setFormData(normalizeFormData(config));
+    setView('form');
+  };
+
+  const handleViewResultFromHistory = (item: HistoryItem) => {
+    if (item.taskType === 'batch') {
+      const jobs = item.result as BatchJob[];
+      setBatchJobs(jobs);
+      setCurrentBatchSessionId(item.id);
+      setView('batch-execution');
+    } else {
+      const config = item.config as CrawlerFormData;
+      setFormData(normalizeFormData(config));
+      setTaskId(item.id);
+      setIsFromBatchExecution(false);
+      setBatchExecutionPrefill(null);
+      setExecutionBackTarget('history');
+      setExecutionViewSeed((s) => s + 1);
+      // Determine if we have logs/results to prefill (optional, execution view fetches status anyway)
+      // But if task is old, maybe we want to show stored result if API 404s?
+      // For now rely on API status endpoint.
+      setView('execution');
+    }
   };
 
   return (
     // Main container forces full viewport size
     <div className="h-screen w-screen overflow-hidden bg-white text-gray-800 font-sans">
       
-      {view === 'execution' ? (
+      {view === 'history' ? (
+        <HistoryView 
+          onBack={handleBackToForm}
+          onRerun={handleRerunFromHistory}
+          onViewResult={handleViewResultFromHistory}
+        />
+      ) : view === 'execution' ? (
         <ExecutionView 
           key={`execution-${executionViewSeed}-${isFromBatchExecution ? 'batch' : 'single'}-${taskId || 'new'}`}
           mode={formData.runMode} 
@@ -324,7 +414,11 @@ const App: React.FC = () => {
           disableAutoStart={isFromBatchExecution}
           onTaskIdChange={handleExecutionStart}
           onBack={() => {
-            if (isFromBatchExecution) {
+            if (executionBackTarget === 'history') {
+              setView('history');
+              return;
+            }
+            if (executionBackTarget === 'batch-execution') {
               setView('batch-execution');
               return;
             }
@@ -358,7 +452,6 @@ const App: React.FC = () => {
             {/* Constrain content width for readability, but background is full */}
             <div className="max-w-6xl mx-auto space-y-10">
               
-              {/* Header Section */}
               <div className="flex items-center gap-5 pb-8 border-b border-gray-100">
                 <div className="p-4 bg-emerald-50 rounded-2xl text-emerald-600 shrink-0">
                   <Bot size={32} />
@@ -371,21 +464,26 @@ const App: React.FC = () => {
                     配置您的爬虫参数以生成自动化脚本
                   </p>
                 </div>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsFromBatchExecution(false);
-                    setBatchExecutionPrefill(null);
-                    setView('batch-config');
-                  }}
-                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors"
-                >
-                  <FileSpreadsheet size={16} />
-                  批量报告爬取
-                </button>
+                
+                <div className="ml-auto flex items-center gap-2">
+                  <button 
+                    onClick={() => setView('history')}
+                    className="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors font-medium border border-gray-100"
+                  >
+                    <Clock size={18} />
+                    历史记录
+                  </button>
+                  <button 
+                     onClick={() => {
+                       setBatchJobs([]); // Clear previous batch context if starting new
+                       setView('batch-config');
+                     }}
+                     className="flex items-center gap-2 px-4 py-2 text-sm text-indigo-600 bg-indigo-50 rounded-lg hover:bg-indigo-100 transition-colors font-medium border border-indigo-100"
+                   >
+                     <FileSpreadsheet size={18} />
+                     批量报告爬取
+                   </button>
+                </div>
               </div>
 
               {/* Form Section */}
@@ -428,12 +526,12 @@ const App: React.FC = () => {
                     </button>
                   </div>
 
-                  {/* Row 2: 额外需求 */}
+                  {/* Row 2: 任务目标 */}
                   <RichInput
-                    label="额外需求（可直接粘贴图片或从本机上传图片/文件）"
-                    name="extraRequirements"
-                    placeholder="请输入任何额外的处理逻辑或需求..."
-                    value={formData.extraRequirements}
+                    label="任务目标 *（可直接粘贴图片或从本机上传图片/文件）"
+                    name="taskObjective"
+                    placeholder="请明确写出你要爬取什么、筛选规则、输出字段和结果要求..."
+                    value={formData.taskObjective}
                     onChange={handleChange}
                     onFileSelect={handleFileSelect}
                     onRemoveFile={handleRemoveFile}
@@ -519,20 +617,7 @@ const App: React.FC = () => {
                         { value: 'news_sentiment', label: '新闻舆情爬取' }
                       ]}
                     />
-                    {/* 重新启用：爬取模式（用于 multi_page 触发目录树枚举 + 真实抓包分类映射） */}
-                    <SelectInput
-                      label="爬取模式"
-                      name="crawlMode"
-                      value={formData.crawlMode}
-                      onChange={handleChange}
-                      icon={<Layers size={18} />}
-                      options={[
-                        { value: 'single_page', label: '单一板块爬取' },
-                        { value: 'multi_page', label: '多板块爬取 (手动选目录树+抓包映射)' },
-                        { value: 'auto_detect', label: '自动探测板块并爬取 (必须提供含有框选板块的截图)' },
-                        { value: 'date_range_api', label: '日期筛选类网站爬取 (API直连+自校准)' }
-                      ]}
-                    />
+                    {/* 爬取模式已移除：由 Agent Planner 自主决策 */}
                     <SelectInput
                       label="是否下载文件"
                       name="downloadReport"

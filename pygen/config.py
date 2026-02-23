@@ -214,3 +214,58 @@ class Config:
         """生成的爬虫脚本输出目录"""
         return Path(__file__).parent / "py"
 
+
+    # ============ Sandbox / Executor ============
+
+    def _sandbox_cfg(self) -> Dict[str, Any]:
+        return self.config.get("sandbox", {}) or {}
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    @property
+    def sandbox_enabled(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("enabled", True), True)
+
+    @property
+    def sandbox_backend(self) -> str:
+        if not self.sandbox_enabled:
+            return "local"
+        backend = str(self._sandbox_cfg().get("backend", "auto")).strip().lower()
+        if backend not in {"docker", "local", "auto"}:
+            return "auto"
+        return backend
+
+    @property
+    def sandbox_auto_start(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("auto_start", True), True)
+
+    @property
+    def sandbox_persistent_session(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("persistent_session", True), True)
+
+    @property
+    def sandbox_docker_image(self) -> str:
+        return str(
+            self._sandbox_cfg().get(
+                "docker_image",
+                "mcr.microsoft.com/playwright/python:v1.41.0-jammy",
+            )
+        ).strip()
+
+    @property
+    def sandbox_docker_auto_pull(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("docker_auto_pull", True), True)
+
+    @property
+    def sandbox_docker_disable_network(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("docker_disable_network", False), False)
+
+    @property
+    def sandbox_docker_mount_workdir(self) -> bool:
+        return self._to_bool(self._sandbox_cfg().get("docker_mount_workdir", True), True)

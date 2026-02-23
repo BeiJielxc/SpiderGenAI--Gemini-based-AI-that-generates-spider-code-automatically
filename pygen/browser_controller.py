@@ -2753,6 +2753,9 @@ HTML 片段：
 
         try:
             next_selectors = [
+                # Common pagination patterns (including ChinaBond)
+                ".pageNext",
+                "a.pageNext",
                 'a:has-text("下一页")',
                 'a:has-text(">")',
                 'a:has-text("Next")',
@@ -2767,7 +2770,10 @@ HTML 片段：
                     element = await self.page.query_selector(selector)
                     if element:
                         await element.click()
-                        await asyncio.sleep(2)
+                        try:
+                            await self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+                        except Exception:
+                            await asyncio.sleep(2)
                         return True
                 except:
                     continue

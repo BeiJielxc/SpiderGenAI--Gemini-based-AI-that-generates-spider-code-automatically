@@ -1,0 +1,1136 @@
+"""
+High-level tools for the Planner agent.
+
+These tools encapsulate multi-step CDP/Playwright workflows behind simple
+interfaces so the LLM only needs to make high-level decisions.
+
+Three tools:
+  1. extract_list_and_pagination  – universal list + pagination discovery
+  2. capture_api_and_infer_params – dynamic API sniffing + parameter attribution
+  3. turn_page_and_verify_change  – paginate + verify content actually changed
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections import Counter
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+
+from bs4 import BeautifulSoup, Tag
+
+try:
+    from tools import ToolContext, ToolResult
+except ImportError:
+    from .tools import ToolContext, ToolResult  # type: ignore
+
+
+# =====================================================================
+# Shared helpers
+# =====================================================================
+
+_DATE_RE = re.compile(
+    r"(\d{4})[\/\.\-年](\d{1,2})[\/\.\-月](\d{1,2})[日]?"
+)
+
+
+def _normalize_date(s: str) -> str:
+    if not s:
+        return ""
+    m = _DATE_RE.search(s.strip())
+    if not m:
+        return ""
+    return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def _text_of(tag: Optional[Tag]) -> str:
+    return (tag.get_text(strip=True) if tag else "").strip()
+
+
+def _extract_go_page_target(onclick: Optional[str]) -> str:
+    if not onclick:
+        return ""
+    m = re.search(r"goPageApp\(['\"]([^'\"]+)['\"]\)", onclick)
+    return m.group(1) if m else ""
+
+
+def _html_sig(html: str) -> str:
+    return hashlib.md5(html.encode("utf-8", "ignore")).hexdigest()
+
+
+# =====================================================================
+# 1. extract_list_and_pagination
+# =====================================================================
+
+def _score_candidate_block(
+    blocks: List[Tag],
+    base_url: str,
+) -> Dict[str, Any]:
+    """Score a group of sibling blocks on how 'list-like' they are."""
+    if not blocks:
+        return {"score": 0}
+
+    has_link = 0
+    has_date = 0
+    items: List[Dict[str, Any]] = []
+
+    for b in blocks[:30]:
+        a = b.select_one("a[href]")
+        if a:
+            has_link += 1
+        all_text = b.get_text(" ", strip=True)
+        date_str = _normalize_date(all_text)
+        if date_str:
+            has_date += 1
+        title = _text_of(a) if a else ""
+        href = (a.get("href", "") if a else "") or ""
+        abs_url = urljoin(base_url, href) if href else ""
+
+        date_elem = None
+        for candidate in b.select("span, em, td, div, time"):
+            d = _normalize_date(_text_of(candidate))
+            if d:
+                date_elem = candidate
+                date_str = d
+                break
+
+        items.append({
+            "title": title,
+            "url": abs_url or href,
+            "date": date_str,
+            "dateText": _text_of(date_elem) if date_elem else "",
+        })
+
+    score = 0
+    n = len(blocks)
+    if n >= 3:
+        score += 20
+    score += min(has_link, 30) * 2
+    score += min(has_date, 30) * 3
+    if has_link > 0 and has_date > 0:
+        score += 30
+
+    first = blocks[0]
+    sel_parts = []
+    if first.get("class"):
+        sel_parts.append(f".{'.'.join(first['class'])}")
+    elif first.name:
+        parent = first.parent
+        if parent and parent.get("class"):
+            sel_parts.append(f".{'.'.join(parent['class'])} > {first.name}")
+        else:
+            sel_parts.append(first.name)
+    selector = "".join(sel_parts) or first.name or "div"
+
+    date_selector = ""
+    title_selector = "a"
+    if items and items[0].get("date"):
+        for candidate_sel in ["span", "em", "td", "time", "div"]:
+            el = first.select_one(candidate_sel)
+            if el and _normalize_date(_text_of(el)):
+                date_selector = candidate_sel
+                break
+
+    a_el = first.select_one("a[href]")
+    if a_el:
+        if a_el.get("class"):
+            title_selector = f"a.{'.'.join(a_el['class'])}"
+        elif a_el.parent and a_el.parent != first and a_el.parent.get("class"):
+            title_selector = f".{'.'.join(a_el.parent['class'])} a"
+
+    # Build sampleHtml: raw HTML of the first 2 list items (truncated).
+    sample_html_parts = []
+    for b in blocks[:2]:
+        raw = str(b)
+        sample_html_parts.append(raw[:600] + ("..." if len(raw) > 600 else ""))
+    sample_html = "\n".join(sample_html_parts)
+
+    # Build structureHint: a human-readable one-liner describing DOM layout.
+    tag_name = first.name or "div"
+    cls = ".".join(first.get("class", []))
+    tag_desc = f"<{tag_name} class='{cls}'>" if cls else f"<{tag_name}>"
+
+    title_tag_desc = ""
+    if a_el:
+        a_cls = ".".join(a_el.get("class", []))
+        a_parent = a_el.parent
+        if a_parent and a_parent != first and a_parent.get("class"):
+            p_cls = ".".join(a_parent.get("class", []))
+            title_tag_desc = f"<{a_parent.name} class='{p_cls}'> > <a>"
+        elif a_cls:
+            title_tag_desc = f"<a class='{a_cls}'>"
+        else:
+            title_tag_desc = "<a>"
+
+    date_tag_desc = ""
+    if date_selector:
+        d_el = first.select_one(date_selector)
+        if d_el:
+            d_cls = ".".join(d_el.get("class", []))
+            date_tag_desc = f"<{d_el.name} class='{d_cls}'>" if d_cls else f"<{d_el.name}>"
+
+    hint_parts = [f"Each item is a {tag_desc}"]
+    if title_tag_desc:
+        hint_parts.append(f"title/link in {title_tag_desc}")
+    if date_tag_desc:
+        hint_parts.append(f"date in {date_tag_desc}")
+    structure_hint = "; ".join(hint_parts)
+
+    return {
+        "score": score,
+        "count": n,
+        "selector": selector,
+        "titleSelector": title_selector,
+        "dateSelector": date_selector,
+        "hasLink": has_link,
+        "hasDate": has_date,
+        "items": items,
+        "sampleHtml": sample_html,
+        "structureHint": structure_hint,
+    }
+
+
+def _discover_list_candidates(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
+    """Find all potential repeating-block groups in the page."""
+    skip_tags = {"script", "style", "noscript", "link", "meta", "head"}
+    skip_classes = {"header", "footer", "nav", "menu", "sidebar", "copyright"}
+
+    candidates: List[Dict[str, Any]] = []
+
+    for parent in soup.find_all(["div", "ul", "ol", "tbody", "section", "main"]):
+        if parent.name in skip_tags:
+            continue
+        cls_str = " ".join(parent.get("class", []))
+        if any(sc in cls_str.lower() for sc in skip_classes):
+            continue
+
+        child_tags: Dict[str, List[Tag]] = {}
+        for child in parent.children:
+            if not isinstance(child, Tag) or child.name in skip_tags:
+                continue
+            key = child.name + "|" + ".".join(child.get("class", []))
+            child_tags.setdefault(key, []).append(child)
+
+        for key, blocks in child_tags.items():
+            if len(blocks) < 3:
+                continue
+            scored = _score_candidate_block(blocks, base_url)
+            if scored["score"] > 30:
+                candidates.append(scored)
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates[:5]
+
+
+def _discover_pagination(soup: BeautifulSoup, base_url: str) -> Dict[str, Any]:
+    """Extract pagination controls (next, prev, page numbers)."""
+    def _pick(el: Optional[Tag]) -> Optional[Dict[str, Any]]:
+        if not el:
+            return None
+        target = _extract_go_page_target(el.get("onclick"))
+        href = el.get("href")
+        url = ""
+        if href and href != "#" and "javascript:" not in (href or "").lower():
+            url = urljoin(base_url, href)
+        elif target:
+            url = urljoin(base_url, target)
+        return {
+            "tag": el.name,
+            "text": _text_of(el),
+            "href": href,
+            "onclick": el.get("onclick"),
+            "target": target or None,
+            "url": url,
+            "class": " ".join(el.get("class", [])),
+        }
+
+    next_selectors = [
+        ".pageNext", "a.pageNext", "a[rel='next']", "a.next",
+        "button.next", "a:contains('下一页')", "a:contains('Next')",
+        "a:contains('>')",
+    ]
+    prev_selectors = [
+        ".pagePrev", "a.pagePrev", "a[rel='prev']", "a.prev",
+        "button.prev",
+    ]
+
+    next_el = None
+    for sel in next_selectors:
+        try:
+            next_el = soup.select_one(sel)
+        except Exception:
+            pass
+        if next_el:
+            break
+
+    if not next_el:
+        for a in soup.find_all("a"):
+            txt = _text_of(a)
+            onclick = a.get("onclick", "")
+            if txt in ("下一页", ">", "›", "Next", ">>") or "goPage" in onclick:
+                cls = " ".join(a.get("class", []))
+                if "prev" not in cls.lower():
+                    next_el = a
+                    break
+
+    prev_el = None
+    for sel in prev_selectors:
+        try:
+            prev_el = soup.select_one(sel)
+        except Exception:
+            pass
+        if prev_el:
+            break
+
+    page_nums: List[Dict[str, Any]] = []
+    for a in soup.select("a.pageNum, a.page-num, a[class*='page']"):
+        text = _text_of(a)
+        if text.isdigit():
+            info = _pick(a) or {}
+            info["text"] = text
+            page_nums.append(info)
+
+    if not page_nums:
+        for container in soup.find_all(["div", "nav", "ul"], class_=lambda c: c and any(
+            kw in " ".join(c).lower() for kw in ("page", "pager", "pagination")
+        )):
+            for a in container.find_all("a"):
+                text = _text_of(a)
+                if text.isdigit():
+                    info = _pick(a) or {}
+                    info["text"] = text
+                    page_nums.append(info)
+            if page_nums:
+                break
+
+    return {
+        "next": _pick(next_el),
+        "prev": _pick(prev_el),
+        "pageNums": page_nums[:20],
+        "totalPages": max((int(p["text"]) for p in page_nums if p.get("text", "").isdigit()), default=0),
+    }
+
+
+async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
+    """
+    Universal list + pagination discovery.
+
+    Automatically:
+    1. Grabs the current page HTML (from browser, always fresh).
+    2. Scans for repeating blocks that look like a data list.
+    3. Extracts items (title, url, date) from the best candidate.
+    4. Discovers pagination controls (next, prev, page numbers).
+    5. Returns structured data + recommended selectors.
+    """
+    try:
+        html = await ctx.browser.get_full_html()
+        ctx.page_html = html
+        if not html or len(html) < 200:
+            return ToolResult(
+                success=False,
+                error="Page HTML is empty or too short",
+                summary="Page HTML is empty or too short – page may not have loaded",
+                error_code="empty_page",
+                recoverable=True,
+                suggested_next_tools=["open_page", "detect_data_status"],
+            )
+
+        page_info = await ctx.browser.get_page_info()
+        ctx.page_info = page_info
+        base_url = (page_info.get("url") or ctx.url or "").strip()
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        candidates = _discover_list_candidates(soup, base_url)
+        pagination = _discover_pagination(soup, base_url)
+
+        if not candidates:
+            return ToolResult(
+                success=False,
+                error="No repeating list blocks found on page",
+                summary=(
+                    "No list-like repeating blocks found. "
+                    "This page may load data dynamically via API – try capture_api_and_infer_params."
+                ),
+                error_code="no_list_found",
+                recoverable=True,
+                suggested_next_tools=["capture_api_and_infer_params", "detect_data_status"],
+            )
+
+        best = candidates[0]
+        items = best.get("items", [])
+
+        parsed_dates = [it["date"] for it in items if it.get("date")]
+        min_date = min(parsed_dates) if parsed_dates else ""
+        max_date = max(parsed_dates) if parsed_dates else ""
+        sd = (ctx.start_date or "").strip()
+        ed = (ctx.end_date or "").strip()
+        has_in_range = bool(parsed_dates and sd and ed and any(sd <= d <= ed for d in parsed_dates))
+        has_older = bool(parsed_dates and sd and any(d < sd for d in parsed_dates))
+
+        date_hints = {
+            "minDate": min_date,
+            "maxDate": max_date,
+            "startDate": sd,
+            "endDate": ed,
+            "hasInRange": has_in_range,
+            "hasOlderThanStart": has_older,
+            "suggestStopPaging": bool(has_in_range and has_older),
+        }
+
+        payload = {
+            "baseUrl": base_url,
+            "bestCandidate": {
+                "selector": best["selector"],
+                "titleSelector": best["titleSelector"],
+                "dateSelector": best["dateSelector"],
+                "score": best["score"],
+                "itemCount": best["count"],
+                "hasLink": best["hasLink"],
+                "hasDate": best["hasDate"],
+            },
+            "structureHint": best.get("structureHint", ""),
+            "sampleHtml": best.get("sampleHtml", ""),
+            "items": items,
+            "pagination": pagination,
+            "dateHints": date_hints,
+            "otherCandidates": [
+                {"selector": c["selector"], "score": c["score"], "count": c["count"]}
+                for c in candidates[1:]
+            ],
+        }
+
+        ctx.enhanced_analysis["list_extract"] = {
+            "selector": best["selector"],
+            "titleSelector": best["titleSelector"],
+            "dateSelector": best["dateSelector"],
+            "structureHint": best.get("structureHint", ""),
+            "itemCount": len(items),
+            "pagination_next": pagination.get("next"),
+        }
+        ctx.enhanced_analysis["_last_list_items"] = items
+
+        summary_parts = [
+            f"Found {len(items)} list items (selector: {best['selector']}, score: {best['score']})",
+        ]
+        if min_date and max_date:
+            summary_parts.append(f"dates: {min_date}..{max_date}")
+        if pagination.get("next"):
+            next_url = pagination["next"].get("url", "")
+            summary_parts.append(f"next page: {next_url[:80]}" if next_url else "next: onclick-based")
+        if pagination.get("totalPages"):
+            summary_parts.append(f"~{pagination['totalPages']} pages")
+
+        next_tools = ["generate_crawler_code", "validate_code"]
+        if not date_hints.get("suggestStopPaging") and pagination.get("next"):
+            next_tools = ["turn_page_and_verify_change", "generate_crawler_code"]
+
+        ctx.log(f"[TOOL] extract_list_and_pagination: {'; '.join(summary_parts)}")
+        return ToolResult(
+            success=True,
+            data=payload,
+            summary="; ".join(summary_parts),
+            suggested_next_tools=next_tools,
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            error=str(exc),
+            summary=f"extract_list_and_pagination failed: {exc}",
+            error_code="extract_list_pagination_failed",
+            recoverable=True,
+            suggested_next_tools=["analyze_page", "capture_api_and_infer_params"],
+        )
+
+
+# =====================================================================
+# 2. capture_api_and_infer_params
+# =====================================================================
+
+async def tool_capture_api_and_infer_params(ctx: ToolContext) -> ToolResult:
+    """
+    Dynamic API sniffing + parameter attribution.
+
+    Automatically:
+    1. Records current network state.
+    2. Attempts pagination interactions (click next, scroll, etc.).
+    3. Captures new XHR/Fetch requests triggered by interactions.
+    4. Identifies the data-bearing API (response contains array of items).
+    5. Diffs parameters between requests to infer page/category/date params.
+    """
+    try:
+        if not ctx.browser.page:
+            return ToolResult(
+                success=False, error="No browser page", summary="No browser page available",
+                error_code="no_browser", recoverable=True,
+                suggested_next_tools=["open_page"],
+            )
+
+        page = ctx.browser.page
+        import asyncio
+
+        original_url = page.url
+
+        before_requests = list(ctx.browser.get_captured_requests().get("api_requests", []))
+        before_urls = {r.get("url", "") for r in before_requests}
+
+        html_before = await page.content()
+        first_text_before = ""
+        try:
+            first_text_before = await page.evaluate("""
+                () => {
+                    const items = document.querySelectorAll('tr, li, div[class]');
+                    for (const el of items) {
+                        const text = el.innerText?.trim();
+                        if (text && text.length > 10 && text.length < 300) return text;
+                    }
+                    return '';
+                }
+            """)
+        except Exception:
+            pass
+
+        ctx.browser._clear_captured_requests()
+
+        interaction_succeeded = False
+
+        next_selectors = [
+            ".pageNext", "a.pageNext", "a.next", ".next",
+            "a:has-text('下一页')", "a:has-text('>')", "a:has-text('Next')",
+            "button:has-text('下一页')",
+            ".pagination a:nth-child(2)",
+            "a.page-num:nth-child(2)", "a.pageNum:nth-child(2)",
+        ]
+        for sel in next_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    interaction_succeeded = True
+                    break
+            except Exception:
+                continue
+
+        if not interaction_succeeded:
+            try:
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                interaction_succeeded = True
+            except Exception:
+                pass
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            await asyncio.sleep(3)
+
+        after_requests = list(ctx.browser.get_captured_requests().get("api_requests", []))
+
+        new_requests = []
+        for r in after_requests:
+            url = r.get("url", "")
+            if url and url not in before_urls:
+                ct = (r.get("responseHeaders", {}).get("content-type", "") or "").lower()
+                body = r.get("responseBody", "") or ""
+                if "json" in ct or body.strip().startswith(("{", "[")):
+                    new_requests.append(r)
+
+        data_apis: List[Dict[str, Any]] = []
+        for r in new_requests:
+            body = r.get("responseBody", "") or ""
+            try:
+                parsed = json.loads(body) if body.strip() else {}
+            except Exception:
+                continue
+
+            arrays = _find_arrays_in_json(parsed)
+            if not arrays:
+                continue
+
+            best_array = max(arrays, key=lambda a: len(a[1]))
+            arr_path, arr_data = best_array
+
+            if len(arr_data) < 2:
+                continue
+
+            item_fields = set()
+            if isinstance(arr_data[0], dict):
+                item_fields = set(arr_data[0].keys())
+
+            has_title = bool(item_fields & {"title", "name", "TITLE", "announcementTitle", "secName"})
+            has_date = bool(item_fields & {"date", "time", "publishDate", "publishTime", "announcementTime", "NOTICE_DATE"})
+
+            url_str = r.get("url", "")
+            method = r.get("method", "GET")
+            parsed_url = urlparse(url_str)
+            query_params = parse_qs(parsed_url.query)
+            post_body = r.get("postData", "") or ""
+            post_params = {}
+            if post_body:
+                try:
+                    post_params = json.loads(post_body)
+                except Exception:
+                    post_params = dict(parse_qs(post_body))
+
+            data_apis.append({
+                "url": url_str,
+                "method": method,
+                "queryParams": {k: v[0] if len(v) == 1 else v for k, v in query_params.items()},
+                "postParams": post_params,
+                "arrayPath": arr_path,
+                "arrayLength": len(arr_data),
+                "itemFields": sorted(item_fields)[:20],
+                "hasTitle": has_title,
+                "hasDate": has_date,
+                "sampleItem": _safe_preview(arr_data[0]) if arr_data else {},
+            })
+
+        # Restore browser to original URL so subsequent tools see the same page.
+        await _restore_page(page, original_url)
+
+        if not data_apis:
+            return ToolResult(
+                success=False,
+                error="No data-bearing API found after interactions",
+                summary=(
+                    "No data API discovered. "
+                    "The page may use server-rendered HTML – try extract_list_and_pagination instead."
+                ),
+                error_code="no_data_api",
+                recoverable=True,
+                suggested_next_tools=["extract_list_and_pagination", "detect_data_status"],
+            )
+
+        inferred_params = _infer_pagination_params(data_apis, before_requests)
+
+        best_api = data_apis[0]
+        payload = {
+            "dataApis": data_apis,
+            "bestApi": best_api,
+            "inferredParams": inferred_params,
+            "interactionSucceeded": interaction_succeeded,
+            "newRequestCount": len(new_requests),
+        }
+
+        summary_parts = [
+            f"Found {len(data_apis)} data API(s)",
+            f"best: {best_api['method']} {best_api['url'][:80]}",
+            f"{best_api['arrayLength']} items in '{best_api['arrayPath']}'",
+        ]
+        if inferred_params:
+            summary_parts.append(f"inferred params: {inferred_params}")
+
+        ctx.enhanced_analysis["captured_data_api"] = payload
+        ctx.log(f"[TOOL] capture_api_and_infer_params: {'; '.join(summary_parts)}")
+
+        return ToolResult(
+            success=True,
+            data=payload,
+            summary="; ".join(summary_parts),
+            suggested_next_tools=["generate_crawler_code", "validate_code"],
+        )
+    except Exception as exc:
+        try:
+            await _restore_page(page, original_url)
+        except Exception:
+            pass
+        return ToolResult(
+            success=False,
+            error=str(exc),
+            summary=f"capture_api_and_infer_params failed: {exc}",
+            error_code="capture_api_infer_failed",
+            recoverable=True,
+            suggested_next_tools=["extract_list_and_pagination", "analyze_page"],
+        )
+
+
+async def _restore_page(page, original_url: str) -> None:
+    """Navigate back to original_url if the page has moved away."""
+    import asyncio
+    try:
+        if page.url != original_url:
+            await page.goto(original_url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
+    except Exception:
+        pass
+
+
+def _find_arrays_in_json(obj: Any, path: str = "", max_depth: int = 5) -> List[Tuple[str, list]]:
+    """Recursively find arrays in a JSON object."""
+    results = []
+    if max_depth <= 0:
+        return results
+    if isinstance(obj, list) and len(obj) >= 2:
+        results.append((path or "root", obj))
+    elif isinstance(obj, dict):
+        for key, val in obj.items():
+            child_path = f"{path}.{key}" if path else key
+            results.extend(_find_arrays_in_json(val, child_path, max_depth - 1))
+    return results
+
+
+def _safe_preview(obj: Any, limit: int = 500) -> Any:
+    """Truncate a JSON object for preview."""
+    try:
+        s = json.dumps(obj, ensure_ascii=False, default=str)
+        if len(s) > limit:
+            return json.loads(s[:limit] + "...")
+    except Exception:
+        pass
+    return obj
+
+
+def _infer_pagination_params(
+    data_apis: List[Dict[str, Any]],
+    before_requests: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Compare before/after API params to guess which ones control pagination."""
+    inferred: Dict[str, str] = {}
+
+    page_keywords = {"page", "pagenum", "pageNo", "pageno", "p", "currentpage", "pageindex", "offset", "start"}
+    size_keywords = {"pagesize", "pageSize", "size", "limit", "count", "rows", "num"}
+    date_keywords = {"date", "startdate", "enddate", "begin", "end", "from", "to", "sedate"}
+    category_keywords = {"category", "type", "column", "plate", "stock", "code", "tabname", "classid"}
+
+    for api in data_apis:
+        all_params = {}
+        all_params.update(api.get("queryParams", {}))
+        all_params.update(api.get("postParams", {}))
+        for key, val in all_params.items():
+            key_lower = key.lower()
+            if key_lower in page_keywords:
+                inferred[key] = "page"
+            elif key_lower in size_keywords:
+                inferred[key] = "pageSize"
+            elif key_lower in date_keywords:
+                inferred[key] = "date"
+            elif key_lower in category_keywords:
+                inferred[key] = "category"
+
+    return inferred
+
+
+# =====================================================================
+# 3. turn_page_and_verify_change
+# =====================================================================
+
+async def tool_turn_page_and_verify_change(ctx: ToolContext, next_url: str = "") -> ToolResult:
+    """
+    Navigate to the next page and verify content actually changed.
+
+    Strategies (tried in order):
+    1. If next_url is provided, navigate directly.
+    2. Try clicking common "next page" selectors.
+    3. If all fail, parse pagination from ctx to find a fallback URL.
+
+    After navigation, verifies content changed by comparing first list item text.
+    """
+    try:
+        if not ctx.browser.page:
+            return ToolResult(
+                success=False, error="No browser page", summary="No browser page available",
+                error_code="no_browser", recoverable=True,
+                suggested_next_tools=["open_page"],
+            )
+
+        page = ctx.browser.page
+        import asyncio
+
+        snapshot_before = await _get_content_fingerprint(page)
+
+        navigated = False
+        method_used = ""
+
+        if next_url and next_url.strip():
+            try:
+                ctx.page_html = None
+                ctx.page_structure = None
+                try:
+                    ctx.enhanced_analysis.pop("_last_html_sig", None)
+                except Exception:
+                    pass
+
+                await page.goto(next_url.strip(), wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    await asyncio.sleep(2)
+                navigated = True
+                method_used = f"direct URL: {next_url[:80]}"
+            except Exception as e:
+                ctx.log(f"[TOOL] turn_page direct navigation failed: {e}")
+
+        if not navigated:
+            next_selectors = [
+                ".pageNext", "a.pageNext", "a.next", ".next",
+                "a:has-text('下一页')", "a:has-text('>')", "a:has-text('Next')",
+                "button:has-text('下一页')",
+            ]
+            for sel in next_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        ctx.page_html = None
+                        ctx.page_structure = None
+
+                        await el.click()
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+                        navigated = True
+                        method_used = f"click selector: {sel}"
+                        break
+                except Exception:
+                    continue
+
+        if not navigated:
+            fallback_url = _find_fallback_next_url(ctx)
+            if fallback_url:
+                try:
+                    ctx.page_html = None
+                    ctx.page_structure = None
+
+                    await page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(2)
+                    navigated = True
+                    method_used = f"fallback URL: {fallback_url[:80]}"
+                except Exception as e:
+                    ctx.log(f"[TOOL] turn_page fallback navigation failed: {e}")
+
+        if not navigated:
+            return ToolResult(
+                success=False,
+                error="Could not navigate to next page",
+                summary="All pagination methods failed. No next page button or URL found.",
+                error_code="turn_page_failed",
+                recoverable=True,
+                suggested_next_tools=["extract_list_and_pagination", "generate_crawler_code"],
+            )
+
+        snapshot_after = await _get_content_fingerprint(page)
+        content_changed = snapshot_before != snapshot_after
+
+        try:
+            ctx.page_info = await ctx.browser.get_page_info()
+        except Exception:
+            pass
+
+        new_url = page.url
+
+        if not content_changed:
+            return ToolResult(
+                success=False,
+                error="Page content did not change after navigation",
+                summary=f"Navigated via {method_used} but content unchanged – may have reached last page or pagination is broken.",
+                error_code="content_unchanged",
+                data={"method": method_used, "newUrl": new_url, "contentChanged": False},
+                recoverable=True,
+                suggested_next_tools=["extract_list_and_pagination", "generate_crawler_code"],
+            )
+
+        return ToolResult(
+            success=True,
+            data={"method": method_used, "newUrl": new_url, "contentChanged": True},
+            summary=f"Successfully turned page via {method_used}; content changed; new URL: {new_url[:100]}",
+            suggested_next_tools=["extract_list_and_pagination", "generate_crawler_code"],
+        )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            error=str(exc),
+            summary=f"turn_page_and_verify_change failed: {exc}",
+            error_code="turn_page_exception",
+            recoverable=True,
+            suggested_next_tools=["extract_list_and_pagination", "generate_crawler_code"],
+        )
+
+
+async def _get_content_fingerprint(page) -> str:
+    """Get a hash of the main content area for change detection."""
+    try:
+        text = await page.evaluate("""
+            () => {
+                const selectors = [
+                    'main', '.content', '.main', '#content', '.list',
+                    'table tbody', '.rightListContent', 'article'
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 50) {
+                        return el.innerText.trim().substring(0, 500);
+                    }
+                }
+                return document.body?.innerText?.substring(0, 800) || '';
+            }
+        """)
+        return hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
+    except Exception:
+        return ""
+
+
+def _find_fallback_next_url(ctx: ToolContext) -> str:
+    """Try to find a next-page URL from previously extracted pagination data."""
+    try:
+        le = ctx.enhanced_analysis.get("list_extract", {})
+        next_info = le.get("pagination_next")
+        if isinstance(next_info, dict):
+            url = next_info.get("url", "")
+            if url:
+                return url
+    except Exception:
+        pass
+    return ""
+
+
+# =====================================================================
+# 4. probe_detail_page
+# =====================================================================
+
+# 即找点击进入新闻链接后新闻正文所在的容器位置
+# Broad selector list covering mainstream CMS and government sites.
+# NO tag-name prefix (use ".TRS_Editor" not "div.TRS_Editor") so it
+# matches <td>, <div>, <section>, etc.
+_DETAIL_CONTENT_SELECTORS = [
+    # Government / finance CMS (TRS)
+    ".TRS_Editor",
+    "#TRS_AUTOA498095",
+    # Common patterns
+    ".article-content",
+    ".article_content",
+    ".news_content",
+    ".detail_content",
+    ".detail-content",
+    ".post-content",
+    ".entry-content",
+    ".xl_content",
+    # Generic
+    "article",
+    "[role='article']",
+    "#content",
+    ".content",
+    "main",
+    # Broader fallbacks
+    ".main-content",
+    ".main_content",
+    ".body-content",
+    ".text",
+    ".news_text",
+    ".detail_text",
+    ".cont_detail",
+]
+
+_DETAIL_TITLE_SELECTORS = [
+    "h1",
+    ".article-title",
+    ".news-title",
+    ".detail-title",
+    ".title",
+    "#title",
+    "h2.title",
+]
+
+
+async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
+    """
+    Open a detail/article page in a NEW tab, scan for the content container
+    and title element, then close the tab (zero side-effects on main page).
+
+    If `url` is empty, automatically picks the first item URL from the
+    previous `extract_list_and_pagination` result.
+
+    Returns:
+      - contentSelector: CSS selector that matched the article body
+      - contentTagName: actual tag name (e.g. "td", "div")
+      - sampleContentHtml: truncated raw HTML of the content container
+      - titleSelector / titleTagName: for the detail page title
+      - structureHint: one-liner DOM description for generate_crawler_code
+    """
+    try:
+        if not ctx.browser.page:
+            return ToolResult(
+                success=False, error="No browser page",
+                summary="No browser page available",
+                error_code="no_browser", recoverable=True,
+                suggested_next_tools=["open_page"],
+            )
+
+        import asyncio
+
+        target_url = (url or "").strip()
+
+        if not target_url:
+            items_data = ctx.enhanced_analysis.get("_last_list_items", [])
+            for item in items_data:
+                u = (item.get("url") or "").strip()
+                if u and u.startswith("http"):
+                    target_url = u
+                    break
+
+        if not target_url:
+            return ToolResult(
+                success=False,
+                error="No detail URL provided and no items from previous extract_list_and_pagination",
+                summary="Provide a detail page URL or run extract_list_and_pagination first",
+                error_code="no_detail_url",
+                recoverable=True,
+                suggested_next_tools=["extract_list_and_pagination"],
+            )
+
+        browser_ctx = ctx.browser.page.context
+        detail_page = await browser_ctx.new_page()
+
+        try:
+
+            await detail_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                await detail_page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                await asyncio.sleep(2)
+
+            detail_html = await detail_page.content()
+            soup = BeautifulSoup(detail_html, "html.parser")
+
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+
+            # --- Scan for content container ---
+            content_selector = ""
+            content_tag_name = ""
+            sample_content_html = ""
+            content_text_len = 0
+
+            for sel in _DETAIL_CONTENT_SELECTORS:
+                try:
+                    el = soup.select_one(sel)
+                except Exception:
+                    continue
+                if el:
+                    text_len = len(el.get_text(strip=True))
+                    if text_len > 200:
+                        content_selector = sel
+                        content_tag_name = el.name
+                        if el.get("class"):
+                            content_tag_name = f"{el.name}.{'.'.join(el['class'])}"
+                        raw = str(el)
+                        sample_content_html = raw[:1200] + ("..." if len(raw) > 1200 else "")
+                        content_text_len = text_len
+                        break
+
+            # Fallback: find the div with most text (low link density)
+            if not content_selector:
+                best_el = None
+                best_len = 0
+                for div in soup.find_all(["div", "td", "section", "article"]):
+                    cls_str = " ".join(div.get("class", []))
+                    id_str = div.get("id", "")
+                    skip_kws = ("nav", "footer", "header", "menu", "sidebar", "list", "page")
+                    if any(kw in (cls_str + id_str).lower() for kw in skip_kws):
+                        continue
+                    text_len = len(div.get_text(strip=True))
+                    links = div.find_all("a")
+                    link_density = len(links) / (text_len + 1)
+                    if text_len > best_len and link_density < 0.05:
+                        best_len = text_len
+                        best_el = div
+                if best_el and best_len > 100:
+                    content_tag_name = best_el.name
+                    if best_el.get("class"):
+                        content_selector = f".{'.'.join(best_el['class'])}"
+                        content_tag_name = f"{best_el.name}.{'.'.join(best_el['class'])}"
+                    elif best_el.get("id"):
+                        content_selector = f"#{best_el['id']}"
+                    else:
+                        content_selector = f"{best_el.name} (fallback-longest)"
+                    raw = str(best_el)
+                    sample_content_html = raw[:1200] + ("..." if len(raw) > 1200 else "")
+                    content_text_len = best_len
+
+            # --- Scan for title ---
+            title_selector = ""
+            title_tag_name = ""
+            title_text = ""
+            for sel in _DETAIL_TITLE_SELECTORS:
+                try:
+                    el = soup.select_one(sel)
+                except Exception:
+                    continue
+                if el:
+                    t = el.get_text(strip=True)
+                    if t and len(t) > 3:
+                        title_selector = sel
+                        title_tag_name = el.name
+                        if el.get("class"):
+                            title_tag_name = f"{el.name}.{'.'.join(el['class'])}"
+                        title_text = t[:200]
+                        break
+
+            # Build structureHint
+            hint_parts = []
+            if content_selector:
+                hint_parts.append(f"article body in <{content_tag_name}> (selector: '{content_selector}', ~{content_text_len} chars)")
+            else:
+                hint_parts.append("no standard content container found – use longest-text fallback")
+            if title_selector:
+                hint_parts.append(f"title in <{title_tag_name}> (selector: '{title_selector}')")
+            structure_hint = "; ".join(hint_parts)
+
+            payload = {
+                "url": target_url,
+                "contentSelector": content_selector,
+                "contentTagName": content_tag_name,
+                "contentTextLength": content_text_len,
+                "sampleContentHtml": sample_content_html,
+                "titleSelector": title_selector,
+                "titleTagName": title_tag_name,
+                "titleText": title_text,
+                "structureHint": structure_hint,
+            }
+
+            ctx.enhanced_analysis["detail_probe"] = {
+                "contentSelector": content_selector,
+                "contentTagName": content_tag_name,
+                "titleSelector": title_selector,
+                "structureHint": structure_hint,
+            }
+
+            summary = f"Detail page probed: {structure_hint}"
+            ctx.log(f"[TOOL] probe_detail_page: {summary}")
+
+            return ToolResult(
+                success=bool(content_selector),
+                data=payload,
+                summary=summary,
+                error_code=None if content_selector else "no_content_container",
+                suggested_next_tools=["generate_crawler_code", "validate_code"],
+            )
+
+        finally:
+            try:
+                await detail_page.close()
+            except Exception:
+                pass
+
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            error=str(exc),
+            summary=f"probe_detail_page failed: {exc}",
+            error_code="probe_detail_failed",
+            recoverable=True,
+            suggested_next_tools=["generate_crawler_code"],
+        )
+
+
+# =====================================================================
+# __all__
+# =====================================================================
+
+__all__ = [
+    "tool_extract_list_and_pagination",
+    "tool_capture_api_and_infer_params",
+    "tool_turn_page_and_verify_change",
+    "tool_probe_detail_page",
+]

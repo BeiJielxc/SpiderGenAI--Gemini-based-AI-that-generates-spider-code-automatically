@@ -320,6 +320,17 @@ class ConditionalPostProcessor:
                 self.injection_log.append("修复脆弱的表格选择器（tbody tr）")
         
         # =========================================================
+        # 4. playwright-stealth 兼容性修复：无条件执行
+        # =========================================================
+        # LLM 可能生成使用旧版 playwright-stealth API (stealth_sync) 的代码
+        # 新版本 2.x 已不再支持该 API，需要移除或替换
+        if "stealth_sync" in script or "playwright_stealth" in script:
+            old_script = script
+            script = self._fix_playwright_stealth_compat(script)
+            if script != old_script:
+                self.injection_log.append("修复 playwright-stealth 兼容性（移除过时 API）")
+        
+        # =========================================================
         # 注意：删除了 _fix_hardcoded_date_extraction
         # 原因：与 LLM 智能修复冲突
         # LLM 修复阶段会结合 page_structure 判断列索引是否正确
@@ -346,6 +357,145 @@ class ConditionalPostProcessor:
                     return True
         
         return False
+    
+    def _fix_playwright_stealth_compat(self, code: str) -> str:
+        """
+        修复 playwright-stealth 兼容性问题
+        
+        playwright-stealth 2.x 版本移除了 stealth_sync 函数，
+        LLM 可能基于旧训练数据生成使用 stealth_sync 的代码。
+        
+        修复策略：
+        1. 移除对 playwright_stealth 的导入（包括整个 try/except 块）
+        2. 移除 stealth_sync 变量定义
+        3. 移除 stealth_sync(page) 调用（包括包装的 try/except 和 if 块）
+        """
+        lines = code.splitlines()
+        new_lines = []
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            current_indent = len(line) - len(line.lstrip())
+            
+            # 检测 try 块开始，可能包含 playwright_stealth 导入
+            if stripped == "try:":
+                # 向前看是否包含 playwright_stealth 导入
+                j = i + 1
+                is_stealth_try = False
+                while j < len(lines):
+                    peek_line = lines[j].strip()
+                    peek_indent = len(lines[j]) - len(lines[j].lstrip())
+                    
+                    if not peek_line:
+                        j += 1
+                        continue
+                    
+                    if peek_indent <= current_indent and peek_line not in ("", "#"):
+                        break
+                    
+                    if "playwright_stealth" in peek_line or "stealth_sync" in peek_line:
+                        is_stealth_try = True
+                        break
+                    
+                    if peek_line.startswith("except"):
+                        break
+                    
+                    j += 1
+                
+                if is_stealth_try:
+                    # 跳过整个 try/except 块
+                    i += 1
+                    in_block = True
+                    block_depth = 1
+                    while i < len(lines) and in_block:
+                        block_line = lines[i]
+                        block_stripped = block_line.strip()
+                        block_indent = len(block_line) - len(block_line.lstrip())
+                        
+                        if not block_stripped:
+                            i += 1
+                            continue
+                        
+                        # 检测 except 块结束
+                        if block_indent <= current_indent and block_stripped and block_stripped not in ("except:", "except ImportError:"):
+                            if not block_stripped.startswith("except"):
+                                in_block = False
+                                break
+                        
+                        i += 1
+                    continue
+            
+            # 跳过单独的 playwright_stealth 导入行
+            if "from playwright_stealth import" in stripped or "import playwright_stealth" in stripped:
+                i += 1
+                continue
+            
+            # 跳过 stealth_sync = None 定义
+            if re.match(r"^\s*stealth_sync\s*=\s*None\s*$", line):
+                i += 1
+                continue
+            
+            # 跳过 if stealth_sync: 块
+            if re.match(r"^\s*if\s+stealth_sync\s*:", stripped):
+                i += 1
+                # 跳过整个 if 块
+                while i < len(lines):
+                    next_line = lines[i]
+                    if not next_line.strip():
+                        i += 1
+                        continue
+                    next_indent = len(next_line) - len(next_line.lstrip())
+                    if next_indent <= current_indent:
+                        break
+                    i += 1
+                continue
+            
+            # 跳过 stealth_sync(page) 调用
+            if "stealth_sync(" in stripped:
+                # 检查前一行是否是 try:
+                if new_lines and new_lines[-1].strip() == "try:":
+                    new_lines.pop()
+                    # 跳过后续的 except 块
+                    i += 1
+                    while i < len(lines):
+                        exc_line = lines[i].strip()
+                        if exc_line.startswith("except"):
+                            i += 1
+                            # 跳过 except 块内容
+                            while i < len(lines):
+                                exc_content = lines[i].strip()
+                                exc_indent = len(lines[i]) - len(lines[i].lstrip())
+                                if exc_content and exc_indent <= current_indent:
+                                    break
+                                i += 1
+                            break
+                        elif not exc_line:
+                            i += 1
+                            continue
+                        else:
+                            break
+                    continue
+                else:
+                    i += 1
+                    continue
+            
+            # 保留其他行
+            new_lines.append(line)
+            i += 1
+        
+        # 清理连续空行（可能因删除代码产生）
+        cleaned_lines = []
+        prev_empty = False
+        for line in new_lines:
+            is_empty = not line.strip()
+            if is_empty and prev_empty:
+                continue
+            cleaned_lines.append(line)
+            prev_empty = is_empty
+        
+        return "\n".join(cleaned_lines)
     
     def get_injection_log(self) -> List[str]:
         """获取注入日志"""

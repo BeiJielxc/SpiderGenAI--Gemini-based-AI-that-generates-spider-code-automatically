@@ -10,14 +10,15 @@ export interface Attachment {
 export interface CrawlerFormData {
   startDate: string;
   endDate: string;
-  extraRequirements: string;
+  taskObjective: string;
+  extraRequirements?: string; // deprecated: kept for backward compatibility
   siteName: string;
   listPageName: string;
   sourceCredibility: string; // 信息源可信度（T1/T2/T3）
   reportUrl: string;
   outputScriptName: string;
   runMode: string;
-  crawlMode: string;
+  crawlMode: string; // deprecated: 保留字段兼容性，新架构统一使用 agent 模式
   downloadReport: string;
   attachments: Attachment[];
 }
@@ -112,12 +113,13 @@ export interface GenerateRequest {
   startDate: string;
   endDate: string;
   outputScriptName: string;
+  taskObjective?: string;
   extraRequirements?: string;
   siteName?: string;
   listPageName?: string;
   sourceCredibility?: string; // 信息源可信度（T1/T2/T3）
   runMode: string;
-  crawlMode: string;
+  crawlMode?: string; // deprecated: 保留兼容，后端统一使用 agent 模式
   downloadReport?: string;
   selectedPaths?: string[];
   attachments?: AttachmentData[];  // 图片/文件附件（base64 编码）
@@ -175,6 +177,17 @@ export interface SSEEvent {
   taskId: string;
   timestamp: number;
   [key: string]: any;
+}
+
+// ============ History Types ============
+export interface HistoryItem {
+  id: string;
+  taskType: 'single' | 'batch';
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  createdAt: string;
+  config: CrawlerFormData | BatchJob[];
+  result?: any;
+  logs?: string[];
 }
 
 // ============ API Base URL ============

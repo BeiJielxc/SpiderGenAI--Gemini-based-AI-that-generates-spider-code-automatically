@@ -174,6 +174,11 @@ class DateAPIExtractor:
         {'type': 'generic-input', 'trigger': 'input[placeholder*="日期"]', 'container': None, 'confirm': None, 'require_visible': True},
         {'type': 'generic-input', 'trigger': 'input[placeholder*="date" i]', 'container': None, 'confirm': None, 'require_visible': True},
         {'type': 'generic-input', 'trigger': 'input[name*="date" i]', 'container': None, 'confirm': None, 'require_visible': True},
+        # === Common English Placeholders ===
+        {'type': 'generic-input', 'trigger': 'input[placeholder="From"]', 'container': None, 'confirm': None, 'require_visible': True},
+        {'type': 'generic-input', 'trigger': 'input[placeholder="To"]', 'container': None, 'confirm': None, 'require_visible': True},
+        {'type': 'generic-input', 'trigger': 'input[placeholder*="Start Date" i]', 'container': None, 'confirm': None, 'require_visible': True},
+        {'type': 'generic-input', 'trigger': 'input[placeholder*="End Date" i]', 'container': None, 'confirm': None, 'require_visible': True},
         # === Layui Laydate ===
         {'type': 'laydate', 'trigger': '[lay-key]', 'container': '.layui-laydate', 'confirm': '.laydate-btns-confirm', 'require_visible': True},
         {'type': 'laydate', 'trigger': '.laydate-icon', 'container': '.layui-laydate', 'confirm': '.laydate-btns-confirm', 'require_visible': True},
@@ -486,10 +491,10 @@ class DateAPIExtractor:
             layer2_result=self._layer2_result,
             layer3_result=self._layer3_result,
             recommendations=[
-                "全局变量扫描失败: " + (self._layer0_result or {}).get('error', ''),
-                "纯 API 直连失败: " + (self._layer1_result or {}).get('error', ''),
-                "DOM 自动检测失败: " + (self._layer2_result or {}).get('error', ''),
-                "LLM 视觉分析失败: " + (self._layer3_result or {}).get('error', ''),
+                "全局变量扫描失败: " + str((self._layer0_result or {}).get('error') or '未知错误'),
+                "纯 API 直连失败: " + str((self._layer1_result or {}).get('error') or '未知错误'),
+                "DOM 自动检测失败: " + str((self._layer2_result or {}).get('error') or '未知错误'),
+                "LLM 视觉分析失败: " + str((self._layer3_result or {}).get('error') or '未知错误'),
                 "建议: 检查页面是否有反爬机制，或手动分析日期控件结构",
             ]
         )
@@ -1025,6 +1030,13 @@ class DateAPIExtractor:
             # 1. 检测日期控件
             picker_info = await self._detect_date_picker()
             
+            # [Added by Fix] 如果未找到可见控件，尝试展开筛选器
+            if not picker_info.found:
+                log("[Layer 2] 未检测到可见日期控件，尝试查找并展开折叠的筛选面板...")
+                if await self._try_expand_filters(log):
+                    # 再次尝试检测
+                    picker_info = await self._detect_date_picker()
+            
             if not picker_info.found:
                 return {
                     'success': False,
@@ -1117,6 +1129,55 @@ class DateAPIExtractor:
                 'data_count': 0
             }
     
+    async def _try_expand_filters(self, log) -> bool:
+        """尝试查找并展开折叠的筛选面板"""
+        if not self.browser or not self.browser.page:
+            return False
+        
+        try:
+            page = self.browser.page
+            
+            # 常见的筛选折叠按钮关键词
+            keywords = [
+                'filter', 'search', 'date', 'time', 'period', 'advanced', 'more',
+                '筛选', '搜索', '日期', '时间', '高级', '更多'
+            ]
+            
+            # 构建 XPath 表达式：查找包含关键词的按钮/链接/标题
+            xpath_parts = []
+            for kw in keywords:
+                # 简单的大小写兼容处理
+                xpath_parts.append(f"contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{kw}')")
+            
+            xpath_condition = " or ".join(xpath_parts)
+            # 查找 button, a, div/span[role=button], h4, h5
+            xpath = f"//button[{xpath_condition}] | //a[{xpath_condition}] | //div[@role='button' and ({xpath_condition})] | //span[@role='button' and ({xpath_condition})] | //h4[{xpath_condition}] | //h5[{xpath_condition}]"
+            
+            elements = await page.query_selector_all(f"xpath={xpath}")
+            
+            clicked = False
+            for el in elements:
+                try:
+                    if await el.is_visible():
+                        text = await el.text_content()
+                        text = text.strip() if text else ""
+                        # 再次过滤，确保不是长文本（避免误点文章标题）
+                        if len(text) < 30:
+                            # 避免点击 "Search" 提交按钮（通常在 form 里的）
+                            # 但在这里我们主要是找折叠器，稍微激进点也没事，反正之后还会重置状态
+                            log(f"[Layer 2] 尝试点击展开筛选器: {text[:20]}")
+                            await el.click()
+                            await asyncio.sleep(0.5) # 等待展开动画
+                            clicked = True
+                except:
+                    continue
+            
+            return clicked
+            
+        except Exception as e:
+            log(f"[Layer 2] 展开筛选器异常: {e}")
+            return False
+
     async def _detect_date_picker(self) -> DatePickerInfo:
         """检测页面中的日期控件（增强版：可见性检查 + 多元素聚合）"""
         if not self.browser or not self.browser.page:

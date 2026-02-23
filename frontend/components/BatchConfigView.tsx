@@ -438,7 +438,7 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
     const result: CrawlerFormData[] = validated.map((row) => ({
       startDate: row.startDate,
       endDate: row.endDate,
-      extraRequirements: '',
+      taskObjective: '',
       siteName: '',
       listPageName: row.listPageName,
       sourceCredibility: row.sourceCredibility,

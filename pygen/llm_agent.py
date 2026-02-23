@@ -464,7 +464,7 @@ class LLMAgent:
             page_html: 完整的页面HTML
             page_structure: 页面结构分析结果
             network_requests: 捕获的网络请求
-            user_requirements: 用户额外需求（可选）
+            user_requirements: 用户任务目标（可选，最高优先级）
             start_date: 爬取开始时间（YYYY-MM-DD）
             end_date: 爬取结束时间（YYYY-MM-DD）
             enhanced_analysis: 增强分析结果（包含数据状态、交互API、参数分析）
@@ -478,9 +478,12 @@ class LLMAgent:
 
         # 记录任务ID（便于区分并发任务日志）
         self._task_id = task_id
+        print(f"{self._dbg_prefix()} >>> generate_crawler_script 入口")
 
         # 准备API请求信息（重点关注）
+        print(f"{self._dbg_prefix()} 准备 API 信息...")
         api_info = self._extract_api_info(network_requests, enhanced_analysis)
+        print(f"{self._dbg_prefix()} API 信息提取完成")
 
         # 准备页面结构摘要
         structure_summary = self._summarize_structure(page_structure)
@@ -648,6 +651,7 @@ class LLMAgent:
             # =====================================================================
             if not self.enable_auto_repair:
                 print(f"{self._dbg_prefix()} ⚠ 已关闭自动修复/验证：直接返回 LLM 原始生成代码")
+                print(f"{self._dbg_prefix()} <<< generate_crawler_script 即将返回 (auto_repair=false)，脚本长度: {len(script)}")
                 return script
 
             # =====================================================================
@@ -695,9 +699,11 @@ class LLMAgent:
                 for log in repair_log:
                     print(f"{self._dbg_prefix()}   - {log}")
 
+            print(f"{self._dbg_prefix()} <<< generate_crawler_script 即将返回，脚本长度: {len(script)}")
             return script
 
         except Exception as e:
+            print(f"{self._dbg_prefix()} !!! generate_crawler_script 抛出异常: {type(e).__name__}: {e}")
             print(f"❌ LLM调用失败: {e}")
             import traceback
             traceback.print_exc()
@@ -1121,19 +1127,15 @@ def fetch_data():
    - 如果代码中使用 Playwright，**必须**设置 `headless=True`。
    - **必须**添加 `--disable-blink-features=AutomationControlled` 启动参数。
    - **必须**在 context 中设置标准的 User-Agent。
-   - **【反爬兜底】必须尝试应用 playwright-stealth**：
+   - **【反爬兜底】使用 Playwright 内置反爬配置即可**（不要使用 playwright-stealth 库，它有版本兼容问题）：
      ```python
-     # 必须包含此导入逻辑
-     try:
-         from playwright_stealth import stealth_sync
-     except ImportError:
-         stealth_sync = None
-     
-     # ... page 创建后 ...
-     if stealth_sync:
-         try:
-             stealth_sync(page)
-         except: pass
+     # 在 browser.new_context() 中配置反爬参数即可，不需要额外库
+     context = browser.new_context(
+         viewport={'width': 1920, 'height': 1080},
+         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+         # 禁用 webdriver 检测
+         extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+     )
      ```
    - 在 `page.goto` 后，**必须**添加随机等待或显式等待（如 `page.wait_for_timeout(3000)`）。
 
@@ -1612,17 +1614,19 @@ if __name__ == "__main__":
 ## 技术选型策略
 
 ### 【反爬兜底】
-- 如果使用 Playwright，**必须**尝试导入并应用 `playwright-stealth`：
+- 如果使用 Playwright，使用内置反爬配置即可（**不要使用 playwright-stealth 库**，它有版本兼容问题）：
 ```python
-try:
-    from playwright_stealth import stealth_sync
-except ImportError:
-    stealth_sync = None
-# ...
-if stealth_sync:
-    try:
-        stealth_sync(page)
-    except: pass
+# 在 browser.new_context() 中配置反爬参数
+context = browser.new_context(
+    viewport={'width': 1920, 'height': 1080},
+    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+)
+# 启动时添加参数禁用自动化检测
+browser = p.chromium.launch(
+    headless=True,
+    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+)
 ```
 
 ### 新闻页面一般特点
@@ -1891,9 +1895,11 @@ if __name__ == "__main__":
         requirements_section = ""
         if user_requirements:
             requirements_section = f"""
-## 用户额外需求
+## 任务目标（最高优先级）
 
 {user_requirements}
+
+你必须优先满足这里的任务目标，再结合页面结构与其他约束生成代码。
 """
 
         # 增强分析部分
@@ -1913,7 +1919,7 @@ if __name__ == "__main__":
         # 获取输出目录的绝对路径
         output_dir = str(Path(__file__).parent / "output")
 
-        # 将“用户额外需求/日期范围”等高优先级约束放在 user_prompt 最前面
+        # 将“任务目标/日期范围”等高优先级约束放在 user_prompt 最前面
         prefix = ""
         if requirements_section.strip():
             prefix += requirements_section.strip() + "\n\n"
@@ -2488,13 +2494,8 @@ from datetime import datetime
 try:
     from playwright.sync_api import sync_playwright
     HAS_PLAYWRIGHT = True
-    try:
-        from playwright_stealth import stealth_sync
-    except ImportError:
-        stealth_sync = None
 except ImportError:
     HAS_PLAYWRIGHT = False
-    stealth_sync = None
     print("[WARN] Playwright not installed, trying requests...")
     import requests
     from bs4 import BeautifulSoup
@@ -2502,25 +2503,22 @@ except ImportError:
 # Configuration
 BASE_URL = "{page_url}"
 
-    def crawl_with_playwright():
+def crawl_with_playwright():
     """使用 Playwright 爬取动态页面"""
     articles = []
     
     with sync_playwright() as p:
+        # 使用内置反爬配置，不依赖 playwright-stealth 库
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            viewport={{'width': 1920, 'height': 1080}},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            extra_http_headers={{"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}}
         )
         page = context.new_page()
-        
-        # 应用反爬兜底
-        if stealth_sync:
-            try:
-                stealth_sync(page)
-            except: pass
 
         try:
             page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
@@ -2808,7 +2806,7 @@ if __name__ == "__main__":
             page_html: 完整的页面HTML
             page_structure: 页面结构分析结果
             network_requests: 捕获的网络请求
-            user_requirements: 用户额外需求
+            user_requirements: 用户任务目标
             start_date: 爬取开始时间
             end_date: 爬取结束时间
             enhanced_analysis: 增强分析结果

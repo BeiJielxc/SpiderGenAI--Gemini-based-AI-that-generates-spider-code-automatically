@@ -27,6 +27,7 @@ from config import Config
 from chrome_launcher import ChromeLauncher
 from browser_controller import BrowserController
 from llm_agent import LLMAgent
+from database import init_db, add_history, update_history_status, get_all_history, get_history_detail
 
 # ============ Pydantic Models ============
 
@@ -49,14 +50,15 @@ class GenerateRequest(BaseModel):
     startDate: str
     endDate: str
     outputScriptName: str
+    taskObjective: Optional[str] = ""
     extraRequirements: Optional[str] = ""
     siteName: Optional[str] = ""
     listPageName: Optional[str] = ""
     sourceCredibility: Optional[str] = ""  # 信息源可信度（T1/T2/T3）
     runMode: str  # 'enterprise_report' | 'news_sentiment'
-    crawlMode: str  # 'single_page' | 'multi_page' | 'auto_detect' | 'date_range_api'
+    crawlMode: Optional[str] = "agent"  # deprecated: 保留兼容旧前端，新架构统一使用 agent 模式
     downloadReport: Optional[str] = "yes"  # 'yes' | 'no'
-    selectedPaths: Optional[List[str]] = None  # 用户选中的目录路径（仅 multi_page 模式）
+    selectedPaths: Optional[List[str]] = None  # 用户选中的目录路径（保留兼容）
     attachments: Optional[List[AttachmentData]] = None  # 图片/文件附件
 
 class ReportFile(BaseModel):
@@ -153,6 +155,13 @@ async def lifespan(app: FastAPI):
         _task_queue = TaskQueue(max_concurrency=config.max_concurrency)
         await _task_queue.start()
         print(f"✓ 任务队列已启动 (max_concurrency={config.max_concurrency})")
+
+    # 初始化数据库
+    try:
+        await asyncio.to_thread(init_db)
+        print("✓ 数据库初始化成功")
+    except Exception as e:
+        print(f"✗ 数据库初始化失败: {e}")
 
     if config and config.sse_enabled:
         from realtime import EventBroadcaster
@@ -278,6 +287,12 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         tasks[task_id]["status"] = "running"
         task_cancelled[task_id] = False  # 初始化取消标志
 
+        # 更新历史记录状态
+        try:
+            await asyncio.to_thread(update_history_status, task_id, "running")
+        except Exception as e:
+            print(f"更新历史记录状态失败: {e}")
+
         # SSE 推送状态变更（从 queued → running）
         if _event_broadcaster is not None:
             await _event_broadcaster.publish(task_id, "status", {"status": "running"})
@@ -355,503 +370,136 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         # 更新浏览器引用
         task_browsers[task_id]["browser"] = browser
         
-        # Step 3: 打开目标页面
+        # ================================================================
+        # Agent 模式：使用 Planner 自主决策（替代原有 crawlMode 分支）
+        # ================================================================
         if _is_cancelled(task_id):
             raise RuntimeError("任务已被用户取消")
-            
-        _update_step(task_id, 2, "正在打开目标页面")
-        _add_log(task_id, f"[INFO] 正在打开: {request.url}")
-        
-        # 使用 domcontentloaded 作为默认等待策略，而不是 networkidle
-        # networkidle 对于不断加载资源的页面（如轮播图、即时通讯）非常容易超时
-        success, error_msg = await browser.open(request.url, wait_until="domcontentloaded")
-        if not success:
-            _add_log(task_id, f"[ERROR] 页面打开失败: {error_msg}")
-            raise RuntimeError(f"无法打开目标页面: {error_msg}")
-        _add_log(task_id, "[SUCCESS] 页面加载完成")
-        
-        # Step 4: 滚动页面
-        if _is_cancelled(task_id):
-            raise RuntimeError("任务已被用户取消")
-            
-        _update_step(task_id, 3, "正在滚动页面以加载更多内容")
-        _add_log(task_id, "[INFO] 滚动页面以触发懒加载...")
-        await browser.scroll_page(times=3)
-        _add_log(task_id, "[SUCCESS] 页面滚动完成")
-        
-        # Step 5: 分析页面结构
-        if _is_cancelled(task_id):
-            raise RuntimeError("任务已被用户取消")
-            
-        _update_step(task_id, 4, "正在分析页面结构")
-        _add_log(task_id, "[INFO] 正在分析页面结构...")
-        
-        # 立即更新步骤状态，确保前端能及时看到
-        await asyncio.sleep(0.1)  # 给前端一点时间接收更新
-        
-        page_info = await browser.get_page_info()
-        page_html = await browser.get_full_html()
-        page_structure = await browser.analyze_page_structure()
-        network_requests = browser.get_captured_requests()
-        
-        _add_log(task_id, f"[INFO] 页面标题: {page_info.get('title', '未知')}")
-        _add_log(task_id, f"[INFO] HTML 长度: {len(page_html):,} 字符")
-        _add_log(task_id, f"[INFO] 捕获请求: {len(network_requests.get('all_requests', []))} 个")
-        
-        # Step 6: 根据模式处理
-        enhanced_analysis = None
-        verified_mapping = None
 
-        # 说明：
-        # - multi_page：用户手动选目录树，仅对“选中目录”抓包还原参数（可信映射），不做通用交互探测
-        # - auto_detect：自动探测板块并爬取，会执行 enhanced_page_analysis() 的通用交互探测
-        if request.crawlMode == "multi_page":
-            _update_step(task_id, 5, "正在构建可信分类映射（选中目录）")
-            _add_log(task_id, "[INFO] 多页模式：仅对选中目录抓包还原参数（不做通用交互探测）")
+        _update_step(task_id, 2, "正在启动 Agent 智能决策")
+        _add_log(task_id, "[INFO] Agent 模式：Planner 将自主探测网站并生成代码")
 
-            # 枚举目录树（仅枚举，不抓包）
-            menu_tree = await browser.enumerate_menu_tree(max_depth=3)
-            leaf_paths = menu_tree.get("leaf_paths", [])
+        from planner import AgentPlanner
 
-            # 根据用户选择过滤
-            selected_paths = request.selectedPaths or leaf_paths
-            _add_log(task_id, f"[INFO] 目录叶子总数: {len(leaf_paths)}，用户选中: {len(selected_paths)}")
+        task_objective = (request.taskObjective or request.extraRequirements or "").strip()
+        supplemental_lines: List[str] = []
+        if request.siteName:
+            supplemental_lines.append(f"官网名称: {request.siteName}")
+        if request.listPageName:
+            supplemental_lines.append(f"列表页面名称: {request.listPageName}")
+        if request.sourceCredibility:
+            supplemental_lines.append(f"信息源可信度: {request.sourceCredibility}")
 
-            # 对选中目录抓包还原参数（可信映射）
-            _add_log(task_id, "[INFO] 正在对选中目录抓包还原参数...")
-            verified_mapping = await browser.capture_mapping_for_leaf_paths(selected_paths)
-            menu_to_filters = (verified_mapping or {}).get("menu_to_filters", {}) if isinstance(verified_mapping, dict) else {}
-            menu_to_urls = (verified_mapping or {}).get("menu_to_urls", {}) if isinstance(verified_mapping, dict) else {}
-            mapping_count = len(menu_to_filters) + len(menu_to_urls)
-
-            enhanced_analysis = {
-                "menu_tree": menu_tree,
-                "selected_leaf_paths": selected_paths,
-                "verified_category_mapping": verified_mapping,
-                # 关键：把“选中目录点击后”的真实 API 请求样本也给到 LLM（避免猜测接口/参数）
-                "interaction_apis": (verified_mapping or {}).get("interaction_apis", {}),
-                "recommendations": [
-                    f"已对选中目录构建可信映射：{mapping_count} 个（filters={len(menu_to_filters)}，urls={len(menu_to_urls)}）"
-                ],
-            }
-
-            _add_log(task_id, f"[SUCCESS] 已构建分类映射: {mapping_count} 个（filters={len(menu_to_filters)}，urls={len(menu_to_urls)}）")
-
-        elif request.crawlMode == "auto_detect":
-            _update_step(task_id, 5, "正在执行智能板块探测 (Phase 1: 决策)")
-            _add_log(task_id, "[INFO] 自动探测模式：启动智能决策流程...")
-
-            # 1. 获取目录树和截图
-            menu_tree = await browser.enumerate_menu_tree(max_depth=3)
-            screenshot = await browser.take_screenshot_base64()
-            _add_log(task_id, f"[INFO] 已提取目录树 ({len(menu_tree.get('leaf_paths', []))} 个叶子) 和页面截图")
-
-            # 2. 初始化 LLM (提前实例化用于决策)
-            temp_llm = LLMAgent(
-                api_key=config.qwen_api_key if config else "",
-                model=config.qwen_model if config else "qwen-max",
-                base_url=config.qwen_base_url if config else None,
-                enable_auto_repair=False # 决策阶段不需要修代码
-            )
-
-            # 3. LLM 决策
-            _add_log(task_id, "[INFO] 正在请求 LLM 决策探测目标...")
-            selected_paths = temp_llm.analyze_menu_for_probing(menu_tree, screenshot)
-            
-            if not selected_paths:
-                _add_log(task_id, "[WARNING] LLM 未选中任何路径，将回退到通用探测")
-                # 回退到旧的增强分析
-                enhanced_analysis = await browser.enhanced_page_analysis()
-                verified_mapping = enhanced_analysis.get("verified_category_mapping")
-            else:
-                _add_log(task_id, f"[SUCCESS] LLM 决策选中 {len(selected_paths)} 个探测目标: {selected_paths}")
-                
-                # 4. 执行定向抓包 (Phase 2)
-                _update_step(task_id, 5, f"正在执行智能板块探测 (Phase 2: 对 {len(selected_paths)} 个目标定向抓包)")
-                _add_log(task_id, "[INFO] 正在执行定向点击与抓包...")
-                
-                verified_mapping = await browser.capture_mapping_for_leaf_paths(selected_paths)
-                menu_to_filters = (verified_mapping or {}).get("menu_to_filters", {}) if isinstance(verified_mapping, dict) else {}
-                menu_to_urls = (verified_mapping or {}).get("menu_to_urls", {}) if isinstance(verified_mapping, dict) else {}
-                mapping_count = len(menu_to_filters) + len(menu_to_urls)
-                
-                # 5. 构建分析结果 (Phase 3)
-                enhanced_analysis = {
-                    "menu_tree": menu_tree,
-                    "selected_leaf_paths": selected_paths,
-                    "verified_category_mapping": verified_mapping,
-                    "interaction_apis": (verified_mapping or {}).get("interaction_apis", {}),
-                    "recommendations": [
-                        f"智能探测完成，已构建可信映射: {mapping_count} 个（filters={len(menu_to_filters)}，urls={len(menu_to_urls)}）"
-                    ],
-                    # 补充基础数据状态检测（为了获取 hasData 等标记）
-                    "data_status": await browser.detect_data_status()
-                }
-
-            # 兜底：确保字段存在
-            if not isinstance(verified_mapping, dict):
-                verified_mapping = {}
-                enhanced_analysis["verified_category_mapping"] = verified_mapping
-
-            _add_log(
-                task_id,
-                f"[SUCCESS] 智能探测完成，构建分类映射: "
-                f"{len((verified_mapping or {}).get('menu_to_filters', {})) + len((verified_mapping or {}).get('menu_to_urls', {}))} 个"
-            )
-        
-        elif request.crawlMode == "date_range_api":
-            # 日期筛选类网站爬取模式：三层策略
-            # 第一层：纯 API 直连
-            # 第二层：DOM 特征检测 + 自动操作日期控件
-            # 第三层：截图 + LLM 视觉分析
-            _update_step(task_id, 5, "正在分析日期 API（三层策略）")
-            _add_log(task_id, "[INFO] 日期筛选模式：启动三层策略...")
-            _add_log(task_id, "[INFO]   第一层: 纯 API 直连")
-            _add_log(task_id, "[INFO]   第二层: DOM 特征检测 + 自动操作")
-            _add_log(task_id, "[INFO]   第三层: 截图 + LLM 视觉分析")
-            
-            # 导入日期 API 提取器
-            from date_api_extractor import DateAPIExtractor, extract_date_api_with_three_layers
-            
-            # 准备 LLM 实例（用于第三层）
-            temp_llm = LLMAgent(
-                api_key=config.qwen_api_key if config else "",
-                model=config.qwen_model if config else "qwen-max",
-                base_url=config.qwen_base_url if config else None,
-                enable_auto_repair=False
-            )
-            
-            # 日志回调
-            def log_callback(msg: str):
-                _add_log(task_id, f"[DATE-API] {msg}")
-            
-            # 执行三层策略
-            extractor = DateAPIExtractor(browser, temp_llm)
-            date_api_result = await extractor.extract_with_three_layers(
-                network_requests,
-                request.startDate,
-                request.endDate,
-                log_callback=log_callback
-            )
-            
-            if date_api_result.success and date_api_result.best_candidate:
-                # 某一层成功
-                candidate = date_api_result.best_candidate
-                layer_name = {1: "纯 API 直连", 2: "DOM 自动操作", 3: "LLM 视觉分析"}.get(date_api_result.layer, "未知")
-                
-                _add_log(task_id, f"[SUCCESS] 第 {date_api_result.layer} 层（{layer_name}）成功！")
-                _add_log(task_id, f"[SUCCESS] 识别到日期 API: {candidate.url[:80]}...")
-                _add_log(task_id, f"[SUCCESS] 日期参数: {list(candidate.date_params.keys())}")
-                _add_log(task_id, f"[SUCCESS] 参数格式: {list(candidate.date_params.values())}")
-                _add_log(task_id, f"[SUCCESS] 验证通过，获取到 {date_api_result.data_count} 条数据")
-                
-                # 生成代码片段供 LLM 参考
-                api_code_snippet = extractor.generate_api_code_snippet(
-                    candidate, 
-                    request.startDate, 
-                    request.endDate
-                )
-                
-                # 构建分析结果
-                enhanced_analysis = {
-                    "date_api_extraction": {
-                        "success": True,
-                        "layer": date_api_result.layer,
-                        "layer_name": layer_name,
-                        "api_url": candidate.url,
-                        "method": candidate.method,
-                        "base_params": candidate.params,
-                        "date_params": candidate.date_params,
-                        "data_count": date_api_result.data_count,
-                        "code_snippet": api_code_snippet,
-                        "replayed_url": extractor.build_replay_url(
-                            candidate, request.startDate, request.endDate
-                        )[0],
-                        "replayed_data": date_api_result.replayed_data,
-                    },
-                    "recommendations": date_api_result.recommendations,
-                    "mode": f"date_range_api_layer{date_api_result.layer}"
-                }
-                
-                _add_log(task_id, f"[SUCCESS] 将生成直接调用 API 的脚本（基于第 {date_api_result.layer} 层结果）")
-                
-            else:
-                # 三层全部失败
-                _add_log(task_id, f"[ERROR] 三层策略均失败")
-                
-                # 输出各层失败原因
-                if date_api_result.layer1_result:
-                    _add_log(task_id, f"[INFO] 第一层失败: {date_api_result.layer1_result.get('error', '未知')}")
-                if date_api_result.layer2_result:
-                    _add_log(task_id, f"[INFO] 第二层失败: {date_api_result.layer2_result.get('error', '未知')}")
-                if date_api_result.layer3_result:
-                    _add_log(task_id, f"[INFO] 第三层失败: {date_api_result.layer3_result.get('error', '未知')}")
-                
-                # 列出发现的候选 API（供调试）
-                if date_api_result.candidates:
-                    _add_log(task_id, f"[INFO] 发现 {len(date_api_result.candidates)} 个候选 API:")
-                    for i, c in enumerate(date_api_result.candidates[:3]):
-                        _add_log(task_id, f"[INFO]   {i+1}. {c.url[:60]}... (置信度: {c.confidence:.2f})")
-                
-                # 构建分析结果（标记失败，但仍提供候选信息）
-                enhanced_analysis = {
-                    "date_api_extraction": {
-                        "success": False,
-                        "layer": 0,
-                        "error": date_api_result.error,
-                        "layer1_error": (date_api_result.layer1_result or {}).get("error"),
-                        "layer2_error": (date_api_result.layer2_result or {}).get("error"),
-                        "layer3_error": (date_api_result.layer3_result or {}).get("error"),
-                        "candidates_count": len(date_api_result.candidates),
-                        "candidates": [
-                            {
-                                "url": c.url,
-                                "method": c.method,
-                                "date_params": c.date_params,
-                                "confidence": c.confidence,
-                                "verification_error": c.verification_result.get("error") if c.verification_result else None
-                            }
-                            for c in date_api_result.candidates[:5]
-                        ]
-                    },
-                    "recommendations": date_api_result.recommendations,
-                    "mode": "date_range_api_all_failed"
-                }
-                
-                _add_log(task_id, "[WARNING] 三层策略均失败，将尝试生成通用爬虫脚本")
-        
+        if task_objective:
+            user_requirements = f"任务目标（最高优先级）:\n{task_objective}"
         else:
-            # 单页模式：基础分析，跳过步骤 5
-            _add_log(task_id, "[INFO] 单页模式：使用基础分析")
-            _update_step(task_id, 5, "已跳过（单页模式）")
-        
-        # Step 7: 调用 LLM 生成脚本
-        if _is_cancelled(task_id):
-            raise RuntimeError("任务已被用户取消")
+            _add_log(task_id, "[WARNING] 未提供任务目标，模型将仅根据页面结构自动推断任务")
+            user_requirements = ""
 
-        # ========== date_range_api：确定性模板优先（成功时跳过 LLM，避免跑偏） ==========
-        script_code = None
-        if request.crawlMode == "date_range_api":
-            dae = (enhanced_analysis or {}).get("date_api_extraction", {}) if isinstance(enhanced_analysis, dict) else {}
-            if isinstance(dae, dict) and dae.get("success") is True:
-                _update_step(task_id, 6, "正在生成确定性 API 直连脚本（跳过LLM）")
-                _add_log(task_id, "[INFO] date_range_api：已验证可用 API，使用确定性模板生成脚本（不调用 LLM）")
-                try:
-                    from deterministic_templates import render_date_range_api_script, analyze_response_schema, build_llm_cloze_prompt, parse_llm_cloze_response
-                    
-                    # ── 自动推断字段映射 ──
-                    field_mappings = None
-                    sample_data = dae.get("replayed_data")
-                    if sample_data and isinstance(sample_data, dict):
-                        field_mappings = analyze_response_schema(sample_data, api_url=str(dae.get("api_url", "")))
-                        _add_log(task_id, f"[INFO] 字段映射自动推断: 置信度={field_mappings.get('confidence', 0):.0%}, "
-                                          f"日期={field_mappings.get('date_fields', [])}, "
-                                          f"标题={field_mappings.get('title_fields', [])}, "
-                                          f"URL={field_mappings.get('url_fields', [])}")
-                        
-                        # 如果有未映射的字段类别 → LLM 完形填空补全
-                        unmapped = field_mappings.get("unmapped", [])
-                        if unmapped and sample_data:
-                            _add_log(task_id, f"[INFO] 字段映射不完整 ({unmapped})，尝试 LLM 完形填空...")
-                            try:
-                                items_for_llm = []
-                                for k in ["data", "result", "list", "items", "rows"]:
-                                    v = sample_data.get(k)
-                                    if isinstance(v, list) and v:
-                                        if isinstance(v[0], dict):
-                                            items_for_llm = v[:1]
-                                        elif isinstance(v[0], list) and v[0] and isinstance(v[0][0], dict):
-                                            items_for_llm = v[0][:1]
-                                        break
-                                if isinstance(sample_data.get("pageHelp"), dict):
-                                    ph_data = sample_data["pageHelp"].get("data", [])
-                                    if ph_data:
-                                        if isinstance(ph_data[0], dict):
-                                            items_for_llm = ph_data[:1]
-                                        elif isinstance(ph_data[0], list) and ph_data[0]:
-                                            items_for_llm = [x for x in ph_data[0] if isinstance(x, dict)][:1]
-                                
-                                if items_for_llm:
-                                    cloze_prompt = build_llm_cloze_prompt(items_for_llm[0], unmapped)
-                                    llm_for_cloze = LLMAgent(
-                                        api_key=config.qwen_api_key if config else "",
-                                        model=config.qwen_model if config else "qwen-max",
-                                        base_url=config.qwen_base_url if config else None,
-                                        enable_auto_repair=False
-                                    )
-                                    cloze_resp = llm_for_cloze._call_llm(
-                                        system_prompt="You are a JSON field mapping assistant. Only output valid JSON.",
-                                        user_prompt=cloze_prompt,
-                                        temperature=0.1
-                                    )
-                                    cloze_result = parse_llm_cloze_response(cloze_resp)
-                                    if cloze_result:
-                                        for field_type, field_names in cloze_result.items():
-                                            if field_names and field_type in field_mappings:
-                                                field_mappings[field_type] = field_names
-                                        still_unmapped = [u for u in unmapped if not cloze_result.get(u)]
-                                        field_mappings["unmapped"] = still_unmapped
-                                        _add_log(task_id, f"[SUCCESS] LLM 完形填空补全: {cloze_result}")
-                            except Exception as cloze_err:
-                                _add_log(task_id, f"[WARNING] LLM 完形填空失败（不影响生成）: {cloze_err}")
-                    
-                    script_code = render_date_range_api_script(
-                        target_url=request.url,
-                        api_url=str(dae.get("api_url", "")),
-                        method=str(dae.get("method", "GET")),
-                        base_params=dae.get("base_params", {}) or {},
-                        date_params=dae.get("date_params", {}) or {},
-                        start_date=request.startDate,
-                        end_date=request.endDate,
-                        output_dir=str((Path(__file__).parent / "output")),
-                        extra_headers={},
-                        field_mappings=field_mappings,
-                    )
-                    _add_log(task_id, "[SUCCESS] 已生成确定性 API 脚本（纯接口直连）")
-                except Exception as tpl_err:
-                    _add_log(task_id, f"[WARNING] 确定性模板生成失败，将回退到 LLM: {tpl_err}")
-                    script_code = None
-            
-        # ========== 其他模式 / 或模板失败：走 LLM 生成 ==========
-        if script_code is None:
-            _update_step(task_id, 6, "正在调用LLM生成爬虫脚本")
-            _add_log(task_id, f"[INFO] 正在调用 LLM: {config.qwen_model if config else 'unknown'}")
-            _add_log(task_id, "[INFO] 这可能需要 20-60 秒，请耐心等待...")
-            _add_log(task_id, f"[INFO] 自动修复/检查/后处理: {'开启' if auto_repair_enabled else '关闭'}")
-            
-            llm = LLMAgent(
-                api_key=config.qwen_api_key if config else "",
-                model=config.qwen_model if config else "qwen-max",
-                base_url=config.qwen_base_url if config else None,
-                enable_auto_repair=auto_repair_enabled
-            )
-            # 构建用户需求
-            user_requirements = request.extraRequirements or ""
-            if request.siteName:
-                user_requirements += f"\n官网名称: {request.siteName}"
-            if request.listPageName:
-                user_requirements += f"\n列表页面名称: {request.listPageName}"
-            if request.sourceCredibility:
-                user_requirements += f"\n信息源可信度: {request.sourceCredibility}"
-            
-            # 准备附件（图片）
-            llm_attachments = None
-            if request.attachments:
-                from llm_agent import AttachmentData
-                llm_attachments = [
-                    AttachmentData(
-                        filename=att.filename,
-                        base64_data=att.base64,
-                        mime_type=att.mimeType
-                    )
-                    for att in request.attachments
-                ]
-                _add_log(task_id, f"[INFO] 已附加 {len(llm_attachments)} 个图片/文件给 LLM")
-            
+        if supplemental_lines:
+            if user_requirements:
+                user_requirements += "\n\n"
+            user_requirements += "\n".join(supplemental_lines)
+
+        llm_attachments = None
+        if request.attachments:
+            from llm_agent import AttachmentData as LLMAttachmentData
+            llm_attachments = [
+                LLMAttachmentData(filename=att.filename, base64_data=att.base64, mime_type=att.mimeType)
+                for att in request.attachments
+            ]
+            _add_log(task_id, f"[INFO] 已附加 {len(llm_attachments)} 个图片/文件")
+
+        llm = LLMAgent(
+            api_key=config.qwen_api_key if config else "",
+            model=config.qwen_model if config else "qwen-max",
+            base_url=config.qwen_base_url if config else None,
+            enable_auto_repair=auto_repair_enabled,
+        )
+
+        planner = AgentPlanner(
+            browser=browser, config=config, llm_agent=llm,
+            url=request.url, run_mode=request.runMode,
+            start_date=request.startDate, end_date=request.endDate,
+            extra_requirements=user_requirements, task_id=task_id,
+            log_callback=lambda msg: _add_log(task_id, msg),
+            attachments=llm_attachments, max_iterations=20,
+            cancel_check=lambda: _is_cancelled(task_id),
+        )
+
+        _update_step(task_id, 5, "Agent 正在自主探测和分析网站")
+        planner_result = await planner.run()
+
+        if not planner_result.success or not planner_result.script_code:
+            error_msg = planner_result.error or "Agent 未能生成有效代码"
+            _add_log(task_id, f"[ERROR] Agent 失败: {error_msg}")
+            raise RuntimeError(error_msg)
+
+        script_code = planner_result.script_code
+        enhanced_analysis = planner_result.enhanced_analysis
+        verified_mapping = planner_result.verified_mapping
+
+        _add_log(task_id, f"[SUCCESS] Agent 完成: {planner_result.iterations} 次迭代, "
+                          f"{len(planner_result.tool_calls)} 次工具调用")
+        _add_log(task_id, f"[INFO] 策略: {planner_result.strategy_summary[:200]}")
+
+        # 后处理：如果 Planner 发现了可信映射，注入到代码中
+        if verified_mapping:
             try:
-                script_code = llm.generate_crawler_script(
-                    page_url=request.url,
-                    page_html=page_html,
-                    page_structure=page_structure,
-                    network_requests=network_requests,
-                    user_requirements=user_requirements if user_requirements.strip() else None,
+                from main import _inject_selected_categories_and_fix_dates
+                script_code = _inject_selected_categories_and_fix_dates(
+                    script_code=script_code,
                     start_date=request.startDate,
                     end_date=request.endDate,
-                    enhanced_analysis=enhanced_analysis,
-                    attachments=llm_attachments,
-                    run_mode=request.runMode,
-                    task_id=task_id
+                    verified_mapping=verified_mapping,
                 )
-                
-                # 检查是否是 fallback 脚本（LLM 调用失败）
-                if (
-                    isinstance(script_code, str)
-                    and ("fallback template" in script_code.lower() or "generated when llm fails" in script_code.lower())
-                ):
-                    _add_log(task_id, "[ERROR] LLM 调用失败，已使用备用模板脚本")
-                    raise RuntimeError("LLM 调用失败，无法生成有效脚本。请检查网络连接或 API 配置。")
-            except Exception as llm_err:
-                error_msg = str(llm_err)
-                _add_log(task_id, f"[ERROR] LLM 生成脚本失败: {error_msg}")
-                # 如果错误信息中包含代理错误，给出更明确的提示
-                if "ProxyError" in error_msg or "proxy" in error_msg.lower():
-                    error_msg = "LLM API 连接失败（代理错误）。请检查网络代理设置或 VPN 配置。"
-                raise RuntimeError(error_msg)
-            
-            token_usage = llm.get_token_usage()
-            _add_log(task_id, f"[SUCCESS] LLM 生成完成，Token: {token_usage['total_tokens']:,}")
-        else:
-            # 确定性模板：不调用 LLM
-            _add_log(task_id, "[SUCCESS] 已跳过 LLM：使用确定性模板生成脚本")
+                injected_filters = len((verified_mapping or {}).get("menu_to_filters", {})) if isinstance(verified_mapping, dict) else 0
+                injected_urls = len((verified_mapping or {}).get("menu_to_urls", {})) if isinstance(verified_mapping, dict) else 0
+                _add_log(task_id, f"[INFO] 已注入可信映射（filters={injected_filters}，urls={injected_urls}）")
+            except Exception as inj_err:
+                _add_log(task_id, f"[WARNING] 可信映射注入失败: {inj_err}")
         
         # 兜底：确保 script_code 是字符串
         if not isinstance(script_code, str) or not script_code.strip():
             _add_log(task_id, "[ERROR] 脚本生成失败：script_code 为空或非字符串")
             raise RuntimeError("脚本生成失败：script_code 为空或非字符串")
-        
-        # 【关键】后处理：注入正确的分类映射（multi_page / auto_detect 且有可信映射时）
-        # 注意：这是数据正确性的保障，必须始终执行，不受 auto_repair 开关影响
-        # LLM 可能忽略 verified_category_mapping 而自己猜测 ID，此处强制覆盖为正确值
-        if request.crawlMode in ("multi_page", "auto_detect") and verified_mapping:
-            from main import _inject_selected_categories_and_fix_dates
-            script_code = _inject_selected_categories_and_fix_dates(
-                script_code=script_code,
-                start_date=request.startDate,
-                end_date=request.endDate,
-                verified_mapping=verified_mapping
-            )
-            injected_filters = len((verified_mapping or {}).get("menu_to_filters", {})) if isinstance(verified_mapping, dict) else 0
-            injected_urls = len((verified_mapping or {}).get("menu_to_urls", {})) if isinstance(verified_mapping, dict) else 0
-            _add_log(task_id, f"[INFO] 已注入可信映射（filters={injected_filters}，urls={injected_urls}）")
-        
-        # 注意：HTTP 韧性层、日期提取工具等后处理已移至 llm_agent.py 中的条件性后处理
-        # 这里不再需要单独调用
-        
-        # Step 8: 验证生成的代码
-        if _is_cancelled(task_id):
-            raise RuntimeError("任务已被用户取消")
-            
-        # Step 8: 验证生成的代码（可选）
-        # 关闭 auto_repair 时：不进行任何检查，直接保存并运行
+
+        # Step 8: 验证代码（可选）
         if auto_repair_enabled:
-            _update_step(task_id, 7, "🔍 正在验证生成的代码")
+            _update_step(task_id, 7, "正在验证生成的代码")
             _add_log(task_id, "[INFO] 正在进行静态代码检查...")
-            
             try:
                 from validator import StaticCodeValidator
                 validator = StaticCodeValidator()
                 issues = validator.validate(script_code)
-                
                 if validator.has_errors():
                     error_issues = [i for i in issues if i.severity.value == "error"]
-                    _add_log(task_id, f"[ERROR] 代码验证失败：发现 {len(error_issues)} 个错误，已停止执行")
-                    # 把最关键的错误原因写出来（避免只看到“失败”不知道为啥）
+                    _add_log(task_id, f"[ERROR] 代码验证失败：发现 {len(error_issues)} 个错误")
                     for it in error_issues[:5]:
                         line_info = f"（行 {it.line_number}）" if getattr(it, "line_number", None) else ""
                         _add_log(task_id, f"[ERROR] - [{it.code}]{line_info} {it.message}")
-                        if getattr(it, "suggestion", ""):
-                            _add_log(task_id, f"[ERROR]   建议: {it.suggestion}")
                     raise RuntimeError("生成的脚本未通过语法/规则验证，已终止任务")
                 else:
                     warn_issues = [i for i in issues if i.severity.value == "warning"]
                     if warn_issues:
                         _add_log(task_id, f"[WARNING] 代码检查通过，但有 {len(warn_issues)} 个警告")
-                        for it in warn_issues[:5]:
-                            _add_log(task_id, f"[WARNING] - [{it.code}] {it.message}")
                     else:
-                        _add_log(task_id, "[SUCCESS] 代码验证通过 ✓")
+                        _add_log(task_id, "[SUCCESS] 代码验证通过")
             except ImportError:
                 _add_log(task_id, "[INFO] 验证器模块未安装，跳过验证")
+            except RuntimeError:
+                raise
             except Exception as val_err:
                 _add_log(task_id, f"[WARNING] 验证时出现问题: {val_err}")
         else:
             _update_step(task_id, 7, "已跳过（auto_repair=false）")
-            _add_log(task_id, "[INFO] 已关闭自动修复：跳过静态代码检查")
-        
+
         # Step 9: 保存脚本
+        print(f"[DEBUG][task={task_id}] === 进入 Step 9: 保存脚本 ===")
         _update_step(task_id, 8, "爬虫脚本已生成")
         
         output_dir = config.output_dir if config else Path("./py")
+        print(f"[DEBUG][task={task_id}] output_dir = {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
         
         output_name = request.outputScriptName
@@ -859,16 +507,20 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             output_name += ".py"
         
         output_path = output_dir / output_name
+        print(f"[DEBUG][task={task_id}] 准备写入脚本到: {output_path}")
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(script_code)
+        print(f"[DEBUG][task={task_id}] 脚本写入完成")
         
         _add_log(task_id, f"[SUCCESS] 脚本已保存: {output_path}")
         _add_log(task_id, f"[SUCCESS] 文件大小: {len(script_code):,} 字符")
         
         # Step 10: 自动运行生成的爬虫脚本
+        print(f"[DEBUG][task={task_id}] 检查任务是否被取消 (Step 10 前)...")
         if _is_cancelled(task_id):
             raise RuntimeError("任务已被用户取消")
             
+        print(f"[DEBUG][task={task_id}] === 进入 Step 10: 运行爬虫脚本 ===")
         _update_step(task_id, 9, "正在运行爬虫脚本")
         _add_log(task_id, f"[INFO] 正在运行: python {output_path}")
         
@@ -1334,6 +986,24 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["resultFile"] = str(output_path)
 
+        # 更新历史记录为完成
+        try:
+            # 过滤不需要存储的大对象（如果有）
+            result_to_save = tasks[task_id].copy()
+            # 移除 logs 以避免重复存储（logs 单独存储）
+            if "logs" in result_to_save:
+                del result_to_save["logs"]
+            
+            await asyncio.to_thread(
+                update_history_status, 
+                task_id, 
+                "completed", 
+                result_to_save, 
+                tasks[task_id]["logs"]
+            )
+        except Exception as e:
+            print(f"保存历史记录失败: {e}")
+
         # SSE 推送完成
         if _event_broadcaster is not None:
             await _event_broadcaster.publish(task_id, "complete", {"status": "completed"})
@@ -1343,6 +1013,22 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
         _add_log(task_id, "[INFO] 任务已被强制停止")
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = "任务被用户强制停止"
+
+        try:
+            result_to_save = tasks[task_id].copy()
+            if "logs" in result_to_save:
+                del result_to_save["logs"]
+            
+            await asyncio.to_thread(
+                update_history_status, 
+                task_id, 
+                "failed", 
+                result_to_save, 
+                tasks[task_id]["logs"]
+            )
+        except Exception as e:
+            print(f"保存历史记录失败: {e}")
+
         # SSE 推送取消
         if _event_broadcaster is not None:
             await _event_broadcaster.publish(task_id, "cancelled", {"status": "failed"})
@@ -1361,6 +1047,21 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             _add_log(task_id, f"[ERROR] {traceback.format_exc()}")
         
         tasks[task_id]["status"] = "failed"
+
+        try:
+            result_to_save = tasks[task_id].copy()
+            if "logs" in result_to_save:
+                del result_to_save["logs"]
+            
+            await asyncio.to_thread(
+                update_history_status, 
+                task_id, 
+                "failed", 
+                result_to_save, 
+                tasks[task_id]["logs"]
+            )
+        except Exception as e:
+            print(f"保存历史记录失败: {e}")
 
         # SSE 推送失败
         if _event_broadcaster is not None:
@@ -1483,6 +1184,12 @@ async def start_generation(request: GenerateRequest):
         "createdAt": time.time()
     }
     
+    # 记录到历史记录数据库
+    try:
+        await asyncio.to_thread(add_history, task_id, "single", request.model_dump())
+    except Exception as e:
+        print(f"写入历史记录失败: {e}")
+    
     if use_queue:
         # 排队模式：放入队列，worker 会在有空位时启动任务
         position = await _task_queue.enqueue(
@@ -1512,47 +1219,74 @@ async def get_task_status(task_id: str):
     
     前端轮询此接口以更新进度和日志
     """
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    # 1. 优先从内存中获取（活跃任务）
+    if task_id in tasks:
+        task = tasks[task_id]
+
+        # 队列信息（仅队列开启时返回）
+        queue_position = None
+        queue_waiting = None
+        queue_running = None
+        estimated_wait = None
+        if _task_queue is not None:
+            qi = _task_queue.get_queue_info(task_id)
+            queue_position = qi["position"]
+            queue_waiting = qi["waitingCount"]
+            queue_running = qi["runningCount"]
+            estimated_wait = qi["estimatedWaitSeconds"]
+            # 更新排队中任务的 stepLabel（实时位置）
+            if task["status"] == "queued" and queue_position > 0:
+                task["stepLabel"] = f"排队等待中...（第 {queue_position} 位，预计 {estimated_wait}s）"
+
+        return TaskStatusResponse(
+            taskId=task["taskId"],
+            status=task["status"],
+            currentStep=task["currentStep"],
+            totalSteps=task["totalSteps"],
+            stepLabel=task["stepLabel"],
+            logs=task["logs"],
+            resultFile=task.get("resultFile"),
+            error=task.get("error"),
+            reports=task.get("reports"),
+            downloadedCount=task.get("downloadedCount"),
+            filesNotEnough=task.get("filesNotEnough"),
+            pdfOutputDir=task.get("pdfOutputDir"),
+            newsArticles=task.get("newsArticles"),
+            markdownFile=task.get("markdownFile"),
+            totalCount=task.get("totalCount"),
+            queuePosition=queue_position,
+            queueWaitingCount=queue_waiting,
+            queueRunningCount=queue_running,
+            estimatedWaitSeconds=estimated_wait,
+        )
     
-    task = tasks[task_id]
+    # 2. 如果内存中没有，尝试从数据库获取（历史任务）
+    try:
+        history_item = await asyncio.to_thread(get_history_detail, task_id)
+        if history_item:
+            # 构造响应
+            result = history_item.get("result", {})
+            return TaskStatusResponse(
+                taskId=history_item["id"],
+                status=history_item["status"],
+                currentStep=12 if history_item["status"] == "completed" else 0, # 假定完成
+                totalSteps=12,
+                stepLabel="任务已归档",
+                logs=history_item.get("logs", []),
+                resultFile=result.get("resultFile"),
+                error=result.get("error"),
+                reports=result.get("reports"),
+                downloadedCount=result.get("downloadedCount"),
+                filesNotEnough=result.get("filesNotEnough"),
+                pdfOutputDir=result.get("pdfOutputDir"),
+                newsArticles=result.get("newsArticles"),
+                markdownFile=result.get("markdownFile"),
+                totalCount=result.get("totalCount"),
+            )
+    except Exception as e:
+        print(f"从数据库恢复任务状态失败: {e}")
 
-    # 队列信息（仅队列开启时返回）
-    queue_position = None
-    queue_waiting = None
-    queue_running = None
-    estimated_wait = None
-    if _task_queue is not None:
-        qi = _task_queue.get_queue_info(task_id)
-        queue_position = qi["position"]
-        queue_waiting = qi["waitingCount"]
-        queue_running = qi["runningCount"]
-        estimated_wait = qi["estimatedWaitSeconds"]
-        # 更新排队中任务的 stepLabel（实时位置）
-        if task["status"] == "queued" and queue_position > 0:
-            task["stepLabel"] = f"排队等待中...（第 {queue_position} 位，预计 {estimated_wait}s）"
-
-    return TaskStatusResponse(
-        taskId=task["taskId"],
-        status=task["status"],
-        currentStep=task["currentStep"],
-        totalSteps=task["totalSteps"],
-        stepLabel=task["stepLabel"],
-        logs=task["logs"],
-        resultFile=task.get("resultFile"),
-        error=task.get("error"),
-        reports=task.get("reports"),
-        downloadedCount=task.get("downloadedCount"),
-        filesNotEnough=task.get("filesNotEnough"),
-        pdfOutputDir=task.get("pdfOutputDir"),
-        newsArticles=task.get("newsArticles"),
-        markdownFile=task.get("markdownFile"),
-        totalCount=task.get("totalCount"),
-        queuePosition=queue_position,
-        queueWaitingCount=queue_waiting,
-        queueRunningCount=queue_running,
-        estimatedWaitSeconds=estimated_wait,
-    )
+    raise HTTPException(status_code=404, detail="任务不存在")
 
 @app.get("/api/download/{filename}")
 async def download_file(filename: str):
@@ -1677,6 +1411,16 @@ async def stop_task(task_id: str):
         _task_queue.cancel(task_id)
         task["status"] = "failed"
         task["error"] = "任务在排队中被取消"
+        
+        # 更新历史记录
+        try:
+            result_to_save = task.copy()
+            if "logs" in result_to_save:
+                del result_to_save["logs"]
+            await asyncio.to_thread(update_history_status, task_id, "failed", result_to_save, task["logs"])
+        except Exception as e:
+            print(f"更新历史记录失败: {e}")
+
         _add_log(task_id, "[INFO] 任务已从排队队列中移除")
         if _event_broadcaster is not None:
             await _event_broadcaster.publish(task_id, "cancelled", {"status": "failed"})
@@ -1698,22 +1442,11 @@ async def stop_task(task_id: str):
     if task_id in task_processes:
         process = task_processes[task_id]
         try:
-            import os
-            
-            # Windows 上使用 terminate()，Unix 上发送 SIGTERM
-            if os.name == 'nt':
-                process.terminate()
-            else:
-                import signal
-                process.send_signal(signal.SIGTERM)
-            
-            # 等待一小段时间
+            process.kill()
             try:
-                process.wait(timeout=3)
-            except:
-                # 如果还没结束，强制杀死
-                process.kill()
-                process.wait()
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
             
             _add_log(task_id, "[INFO] 爬虫脚本已终止")
         except Exception as e:
@@ -1752,6 +1485,16 @@ async def stop_task(task_id: str):
     # 更新任务状态
     task["status"] = "failed"
     task["error"] = "任务被用户停止"
+    
+    # 更新历史记录
+    try:
+        result_to_save = task.copy()
+        if "logs" in result_to_save:
+            del result_to_save["logs"]
+        await asyncio.to_thread(update_history_status, task_id, "failed", result_to_save, task["logs"])
+    except Exception as e:
+        print(f"更新历史记录失败: {e}")
+
     _add_log(task_id, "[INFO] ✅ 任务已停止")
     
     return {"message": "任务已停止", "taskId": task_id}
@@ -1795,6 +1538,66 @@ async def sse_events(task_id: str):
     )
 
 
+@app.get("/api/history")
+async def get_history_list():
+    """
+    获取历史任务列表
+    """
+    try:
+        return await asyncio.to_thread(get_all_history)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取历史记录失败: {str(e)}")
+
+@app.get("/api/history/{task_id}")
+async def get_history_item(task_id: str):
+    """
+    获取单个历史任务详情
+    """
+    try:
+        item = await asyncio.to_thread(get_history_detail, task_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return item
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取任务详情失败: {str(e)}")
+
+class HistoryLogRequest(BaseModel):
+    id: str
+    taskType: str
+    status: str
+    config: Any
+    result: Optional[Any] = None
+    logs: Optional[List[str]] = None
+
+@app.post("/api/history/log")
+async def log_history(request: HistoryLogRequest):
+    """
+    前端主动记录历史（用于 Batch 任务等客户端管理的任务）
+    """
+    try:
+        # 检查是否存在
+        existing = await asyncio.to_thread(get_history_detail, request.id)
+        if existing:
+            await asyncio.to_thread(
+                update_history_status, 
+                request.id, 
+                request.status, 
+                request.result or request.config, # Batch 任务 result 往往就是更新后的 config (jobs)
+                request.logs
+            )
+        else:
+            await asyncio.to_thread(
+                add_history, 
+                request.id, 
+                request.taskType, 
+                request.config
+            )
+        return {"message": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"记录历史失败: {str(e)}")
+
 # ============ 主入口 ============
 
 if __name__ == "__main__":
@@ -1813,4 +1616,3 @@ if __name__ == "__main__":
     print("🚀 启动 PyGen API Server...")
     print("   访问 http://localhost:8000/docs 查看 API 文档")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

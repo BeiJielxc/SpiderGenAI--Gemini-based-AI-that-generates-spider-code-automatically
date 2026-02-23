@@ -494,16 +494,18 @@ class StaticCodeValidator:
     
     def _check_date_from_title(self, code: str) -> None:
         """检查从标题猜测日期的问题"""
+        # 去掉单行注释，避免误伤（例如注释里包含“2026年”但并非从 title 推断日期）
+        code_scan = re.sub(r"(?m)#.*$", "", code)
+        # Each pattern must match within a SINGLE line (no DOTALL) to avoid
+        # cross-line false positives where unrelated "title" and "date"
+        # variables happen to coexist in the same file.
         patterns = [
-            r'年度.*?report.*?(\d{4})',
-            r"re\.search\(['\"].*年.*['\"].*title",
-            r"title.*年.*date",
-            r'f"{year}.*-12-31"',
-            r"12-31.*date",
+            r"re\.search\(['\\\"].*年.*['\\\"].*title",
+            r'f"{year}\s*-12-31"',
         ]
-        
+
         for pattern in patterns:
-            if re.search(pattern, code, re.IGNORECASE | re.DOTALL):
+            if re.search(pattern, code_scan, re.IGNORECASE):
                 self.issues.append(CodeIssue(
                     code="ERR_008",
                     severity=IssueSeverity.ERROR,
