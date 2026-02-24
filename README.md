@@ -246,28 +246,21 @@ npm run dev
 - **说明**：填写 URL、日期范围、运行模式等基础配置。
 - **Note**: Fill in URL, date range, run mode, etc.
 
-#### 2) 自动识别网页目录树并选择 (Tree selection)
-
-![目录树选择 - 多板块手动选择 / Tree selection - manual multi-category selection](pic/tree.gif)
-
-- **说明**：多板块爬取（手动）时，用户可以选择手动选取需要爬取的板块。
-- **Note**: Select category paths when using manual multi-category crawling.
-
-#### 3) 企业报告下载 - 执行监控 (Enterprise report - execution)
+#### 2) 企业/新闻报告下载 - 执行监控 (Enterprise report - execution)
 
 ![企业报告下载 - 执行监控 / Enterprise report - execution monitor](pic/pdfdownload.gif)
 
 - **说明**：查看任务日志、进度与报告结果列表；可下载生成脚本/查看文件。
 - **Note**: Monitor logs/progress and inspect report results; download the generated script/files.
 
-#### 4) 新闻舆情爬取 - 执行监控 (News sentiment - execution)
+#### 3) 新闻舆情爬取 - 执行监控 (News sentiment - execution)
 
 ![新闻舆情爬取 - 执行监控 / News sentiment - execution monitor](pic/newsdownload.gif)
 
 - **说明**：查看任务日志、进度与文章列表/详情；多板块时可标记来源板块。
 - **Note**: Monitor logs/progress and inspect article list/details; categories are labeled in multi-category mode.
 
-#### 5) 批量爬取界面 (Batch Crawling Interface)
+#### 4) 批量爬取界面 (Batch Crawling Interface)
 
 ![批量爬取界面 - 配置与监控 / Batch Crawl Interface - Config & Monitor](pic/PLPAGE.gif)
 
