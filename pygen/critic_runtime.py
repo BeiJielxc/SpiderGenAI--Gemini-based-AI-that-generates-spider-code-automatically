@@ -193,6 +193,7 @@ class Critic:
         target_url: str = "",
         max_retries: Optional[int] = None,
         executor_session=None,
+        enhanced_analysis: Optional[Dict[str, Any]] = None,
     ) -> CriticVerdict:
         retries = max(1, min(3, int(max_retries if max_retries is not None else self.max_retries)))
         if not (code or "").strip():
@@ -221,6 +222,7 @@ class Critic:
             round_index=1,
             excluded_primary_causes=set(),
             run_minimal_experiment=True,
+            enhanced_analysis=enhanced_analysis,
         )
         evidence.extend(round1["evidence"])
         round_summaries.append(round1["summary_payload"])
@@ -302,6 +304,7 @@ class Critic:
             round_index=2,
             excluded_primary_causes=set(),
             run_minimal_experiment=True,
+            enhanced_analysis=enhanced_analysis,
         )
         evidence.extend(round2["evidence"])
         round_summaries.append(round2["summary_payload"])
@@ -351,6 +354,7 @@ class Critic:
             round_index=3,
             excluded_primary_causes=excluded,
             run_minimal_experiment=True,
+            enhanced_analysis=enhanced_analysis,
         )
         evidence.extend(round3_diag["evidence"])
         round_summaries.append(round3_diag["summary_payload"])
@@ -386,6 +390,7 @@ class Critic:
             round_index=3,
             excluded_primary_causes=set(),
             run_minimal_experiment=False,
+            enhanced_analysis=enhanced_analysis,
         )
         evidence.extend(final_verify["evidence"])
         round_summaries.append(final_verify["summary_payload"])
@@ -433,9 +438,13 @@ class Critic:
         round_index: int,
         excluded_primary_causes: set[str],
         run_minimal_experiment: bool,
+        enhanced_analysis: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         evidence_steps: List[Dict[str, Any]] = []
-        static_issues = self._collect_static_issues(code=code, run_mode=run_mode, objective=objective)
+        detail_probe = (enhanced_analysis or {}).get("detail_probe") if isinstance(enhanced_analysis, dict) else None
+        static_issues = self._collect_static_issues(
+            code=code, run_mode=run_mode, objective=objective, detail_probe=detail_probe
+        )
         static_errors = [item for item in static_issues if item.severity == "error"]
         static_warnings = [item for item in static_issues if item.severity == "warning"]
 
@@ -565,7 +574,13 @@ class Critic:
             "runtime_result": runtime_result,
         }
 
-    def _collect_static_issues(self, code: str, run_mode: str, objective: str) -> List[CriticIssue]:
+    def _collect_static_issues(
+        self,
+        code: str,
+        run_mode: str,
+        objective: str,
+        detail_probe: Optional[Dict[str, Any]] = None,
+    ) -> List[CriticIssue]:
         issues: List[CriticIssue] = []
         validator_issues = self.static_validator.validate(code)
         for item in validator_issues:
@@ -583,6 +598,25 @@ class Critic:
                 issues.append(CriticIssue("warning", "field_missing", f"Expected field '{field}' not detected in code."))
         if objective and "TODO" in code:
             issues.append(CriticIssue("warning", "todo_left", "Code contains TODO placeholder."))
+
+        # 详情页正文选择器：代码必须使用 probe 返回的候选中之一（大模型自己选），不能使用未在候选里的泛化选择器
+        if detail_probe and isinstance(detail_probe, dict):
+            candidates = detail_probe.get("contentCandidates") or []
+            allowed_selectors = [str(c.get("selector", "")).strip() for c in candidates if c.get("selector")]
+            if allowed_selectors:
+                used_any = any(sel in code for sel in allowed_selectors)
+                if not used_any:
+                    msg = (
+                        "详情页正文未使用 probe_detail_page 返回的任一候选选择器。"
+                        "请从 probe 的 contentCandidates 中任选一个作为正文容器，不要使用泛化的 article/main。"
+                    )
+                    issues.append(
+                        CriticIssue(
+                            "error",
+                            "detail_body_selector_mismatch",
+                            msg,
+                        )
+                    )
         return issues
 
     async def _run_lightweight_execution(

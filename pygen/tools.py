@@ -1188,6 +1188,7 @@ async def tool_critic_validate(ctx: ToolContext, objective: str = "", min_items:
                 target_url=ctx.url,
                 max_retries=3,
                 executor_session=ctx.executor_session,
+                enhanced_analysis=getattr(ctx, "enhanced_analysis", None),
             )
         else:
             verdict = ctx.critic.evaluate_generated_code(

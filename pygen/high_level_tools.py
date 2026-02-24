@@ -1165,29 +1165,27 @@ def _find_fallback_next_url(ctx: ToolContext) -> str:
 # =====================================================================
 
 # 即找点击进入新闻链接后新闻正文所在的容器位置
-# Broad selector list covering mainstream CMS and government sites.
-# NO tag-name prefix (use ".TRS_Editor" not "div.TRS_Editor") so it
-# matches <td>, <div>, <section>, etc.
+# 用于发现候选；最终由“所有发现的容器+信息”供大模型选择，此处仅作候选来源
 _DETAIL_CONTENT_SELECTORS = [
-    # Government / finance CMS (TRS)
     ".TRS_Editor",
     "#TRS_AUTOA498095",
-    # Common patterns
     ".article-content",
     ".article_content",
+    ".article.content-container",
+    ".content-container",
+    ".article__body",
+    ".article-body",
     ".news_content",
     ".detail_content",
     ".detail-content",
     ".post-content",
     ".entry-content",
     ".xl_content",
-    # Generic
     "article",
     "[role='article']",
     "#content",
     ".content",
     "main",
-    # Broader fallbacks
     ".main-content",
     ".main_content",
     ".body-content",
@@ -1271,57 +1269,85 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
 
-            # --- Scan for content container ---
-            content_selector = ""
-            content_tag_name = ""
-            sample_content_html = ""
-            content_text_len = 0
+            # --- 收集所有可能的正文容器候选（供大模型选择）---
+            def _selector_for_el(el: Tag) -> str:
+                if el.get("id"):
+                    return f"#{el['id']}"
+                if el.get("class"):
+                    return f"{el.name}.{'.'.join(el['class'])}"
+                return el.name
+
+            def _text_len_links(el: Tag) -> Tuple[int, int]:
+                text = el.get_text(strip=True)
+                return len(text), len(el.find_all("a"))
+
+            seen_selectors: set = set()
+            content_candidates: List[Dict[str, Any]] = []
 
             for sel in _DETAIL_CONTENT_SELECTORS:
                 try:
-                    el = soup.select_one(sel)
+                    elements = soup.select(sel)
                 except Exception:
                     continue
-                if el:
-                    text_len = len(el.get_text(strip=True))
-                    if text_len > 50:
-                        content_selector = sel
-                        content_tag_name = el.name
-                        if el.get("class"):
-                            content_tag_name = f"{el.name}.{'.'.join(el['class'])}"
+                for el in elements:
+                    text_len, link_count = _text_len_links(el)
+                    if text_len < 50:
+                        continue
+                    selector = _selector_for_el(el)
+                    if selector in seen_selectors:
+                        continue
+                    seen_selectors.add(selector)
+                    link_density = link_count / (text_len + 1)
+                    text_preview = (el.get_text(strip=True) or "")[:80].replace("\n", " ")
+                    content_candidates.append({
+                        "selector": selector,
+                        "textLength": text_len,
+                        "linkCount": link_count,
+                        "linkDensity": round(link_density, 4),
+                        "textPreview": text_preview,
+                    })
+
+            # Fallback: 正文最长、链接密度低的块
+            for div in soup.find_all(["div", "td", "section", "article", "main"]):
+                cls_str = " ".join(div.get("class", []))
+                id_str = div.get("id", "")
+                if any(kw in (cls_str + id_str).lower() for kw in ("nav", "footer", "header", "menu", "sidebar", "list", "page")):
+                    continue
+                text_len, link_count = _text_len_links(div)
+                if text_len < 100:
+                    continue
+                link_density = link_count / (text_len + 1)
+                if link_density > 0.1:
+                    continue
+                selector = _selector_for_el(div)
+                if selector in seen_selectors:
+                    continue
+                seen_selectors.add(selector)
+                content_candidates.append({
+                    "selector": selector,
+                    "textLength": text_len,
+                    "linkCount": link_count,
+                    "linkDensity": round(link_density, 4),
+                    "textPreview": (div.get_text(strip=True) or "")[:80].replace("\n", " "),
+                })
+
+            # 按“正文长度优先、链接密度低优先”排序，取前 10 个；推荐 = 第 1 个
+            content_candidates.sort(key=lambda c: (c["textLength"], -c["linkDensity"]), reverse=True)
+            content_candidates = content_candidates[:10]
+
+            recommended = content_candidates[0] if content_candidates else None
+            content_selector = (recommended["selector"] if recommended else "")
+            content_tag_name = content_selector.split(".")[0] if content_selector else ""
+            content_text_len = (recommended["textLength"] if recommended else 0)
+            sample_content_html = ""
+            if recommended and content_selector:
+                try:
+                    el = soup.select_one(content_selector)
+                    if el:
                         raw = str(el)
                         sample_content_html = raw[:1200] + ("..." if len(raw) > 1200 else "")
-                        content_text_len = text_len
-                        break
-
-            # Fallback: find the div with most text (low link density)
-            if not content_selector:
-                best_el = None
-                best_len = 0
-                for div in soup.find_all(["div", "td", "section", "article"]):
-                    cls_str = " ".join(div.get("class", []))
-                    id_str = div.get("id", "")
-                    skip_kws = ("nav", "footer", "header", "menu", "sidebar", "list", "page")
-                    if any(kw in (cls_str + id_str).lower() for kw in skip_kws):
-                        continue
-                    text_len = len(div.get_text(strip=True))
-                    links = div.find_all("a")
-                    link_density = len(links) / (text_len + 1)
-                    if text_len > best_len and link_density < 0.05:
-                        best_len = text_len
-                        best_el = div
-                if best_el and best_len > 100:
-                    content_tag_name = best_el.name
-                    if best_el.get("class"):
-                        content_selector = f".{'.'.join(best_el['class'])}"
-                        content_tag_name = f"{best_el.name}.{'.'.join(best_el['class'])}"
-                    elif best_el.get("id"):
-                        content_selector = f"#{best_el['id']}"
-                    else:
-                        content_selector = f"{best_el.name} (fallback-longest)"
-                    raw = str(best_el)
-                    sample_content_html = raw[:1200] + ("..." if len(raw) > 1200 else "")
-                    content_text_len = best_len
+                except Exception:
+                    pass
 
             # --- Scan for title ---
             title_selector = ""
@@ -1342,12 +1368,12 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                         title_text = t[:200]
                         break
 
-            # Build structureHint
+            # Build structureHint（只说明候选数量，由大模型自己选）
             hint_parts = []
-            if content_selector:
-                hint_parts.append(f"article body in <{content_tag_name}> (selector: '{content_selector}', ~{content_text_len} chars)")
+            if content_candidates:
+                hint_parts.append(f"{len(content_candidates)} body container candidates for LLM to choose from")
             else:
-                hint_parts.append("no standard content container found – use longest-text fallback")
+                hint_parts.append("no content container found – use longest-text fallback")
             if title_selector:
                 hint_parts.append(f"title in <{title_tag_name}> (selector: '{title_selector}')")
             structure_hint = "; ".join(hint_parts)
@@ -1358,6 +1384,7 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                 "contentTagName": content_tag_name,
                 "contentTextLength": content_text_len,
                 "sampleContentHtml": sample_content_html,
+                "contentCandidates": content_candidates,
                 "titleSelector": title_selector,
                 "titleTagName": title_tag_name,
                 "titleText": title_text,
@@ -1367,6 +1394,7 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
             ctx.enhanced_analysis["detail_probe"] = {
                 "contentSelector": content_selector,
                 "contentTagName": content_tag_name,
+                "contentCandidates": content_candidates,
                 "titleSelector": title_selector,
                 "structureHint": structure_hint,
             }

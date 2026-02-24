@@ -105,3 +105,12 @@ def get_history_detail(task_id):
             "logs": json.loads(row["logs"]) if row["logs"] else []
         }
     return None
+
+def delete_history(task_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('DELETE FROM history WHERE id = ?', (task_id,))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted

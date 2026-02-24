@@ -475,6 +475,7 @@ class AgentPlanner:
                 target_url=self.ctx.url,
                 max_retries=3,
                 executor_session=self.ctx.executor_session,
+                enhanced_analysis=getattr(self.ctx, "enhanced_analysis", None),
             )
         else:
             verdict = self.ctx.critic.evaluate_generated_code(

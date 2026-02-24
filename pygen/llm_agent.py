@@ -2281,6 +2281,25 @@ if __name__ == "__main__":
             lines.append("\n### 系统建议\n")
             for rec in recommendations:
                 lines.append(f"- ⚠️ {rec}")
+
+        # 详情页正文容器（probe_detail_page 结果）：只提供候选，由大模型自己选
+        detail_probe = enhanced_analysis.get("detail_probe", {})
+        if detail_probe and isinstance(detail_probe, dict):
+            candidates = detail_probe.get("contentCandidates") or []
+            lines.append("\n### 【详情页正文容器】请从下列候选中自行选择")
+            if candidates:
+                lines.append(
+                    "probe_detail_page 已探测详情页，得到以下正文容器候选（含正文长度、链接密度等）。"
+                    "**请根据正文长度、链接密度、textPreview 等自行判断，从中选择最像文章正文的一个**，在生成代码中仅使用该选择器。不要使用泛化的 `article` 或 `main`。"
+                )
+                for i, c in enumerate(candidates[:10], 1):
+                    sel = c.get("selector", "")
+                    tl = c.get("textLength", 0)
+                    ld = c.get("linkDensity", 0)
+                    preview = (c.get("textPreview") or "")[:60]
+                    lines.append(f"  {i}. selector=`{sel}` | 正文长度={tl} | 链接密度={ld} | 预览={preview!r}")
+            else:
+                lines.append("未探测到正文容器候选，请根据页面结构自行选择正文区域。")
         
         return "\n".join(lines)
 

@@ -11,6 +11,7 @@ import {
   FileText,
   PlayCircle,
   Eye,
+  Trash2,
   RefreshCw,
   MoreHorizontal,
   ChevronRight
@@ -29,6 +30,7 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [selectedItem, setSelectedItem] = useState<HistoryItem | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchHistory();
@@ -46,6 +48,43 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
       console.error('Failed to fetch history:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const deleteHistoryItem = async (item: HistoryItem) => {
+    const confirmed = window.confirm('确定删除该历史记录吗？删除后不可恢复。');
+    if (!confirmed) return;
+
+    try {
+      setDeletingIds((prev) => new Set(prev).add(item.id));
+      const res = await fetch(`${API_BASE_URL}/api/history/${encodeURIComponent(item.id)}`, {
+        method: 'DELETE'
+      });
+
+      if (!res.ok) {
+        let errMsg = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          if (errData?.detail) errMsg = errData.detail;
+        } catch {
+          // ignore parse error, use status code
+        }
+        throw new Error(errMsg);
+      }
+
+      setHistory((prev) => prev.filter((historyItem) => historyItem.id !== item.id));
+      if (selectedItem?.id === item.id) {
+        setSelectedItem(null);
+      }
+    } catch (err) {
+      console.error('Failed to delete history item:', err);
+      alert('删除失败，请稍后重试。');
+    } finally {
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(item.id);
+        return next;
+      });
     }
   };
 
@@ -251,6 +290,15 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
                         重新运行
                       </button>
                     )}
+
+                    <button
+                      onClick={() => deleteHistoryItem(item)}
+                      disabled={deletingIds.has(item.id)}
+                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-white border border-red-100 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 size={16} />
+                      {deletingIds.has(item.id) ? '删除中...' : '删除'}
+                    </button>
                   </div>
                 </div>
               );

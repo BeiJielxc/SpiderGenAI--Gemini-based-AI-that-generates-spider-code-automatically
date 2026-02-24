@@ -27,7 +27,14 @@ from config import Config
 from chrome_launcher import ChromeLauncher
 from browser_controller import BrowserController
 from llm_agent import LLMAgent
-from database import init_db, add_history, update_history_status, get_all_history, get_history_detail
+from database import (
+    init_db,
+    add_history,
+    update_history_status,
+    get_all_history,
+    get_history_detail,
+    delete_history as delete_history_record,
+)
 
 # ============ Pydantic Models ============
 
@@ -1562,6 +1569,21 @@ async def get_history_item(task_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取任务详情失败: {str(e)}")
+
+@app.delete("/api/history/{task_id}")
+async def delete_history_item(task_id: str):
+    """
+    删除单个历史任务
+    """
+    try:
+        deleted = await asyncio.to_thread(delete_history_record, task_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {"message": "ok"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除历史记录失败: {str(e)}")
 
 class HistoryLogRequest(BaseModel):
     id: str
