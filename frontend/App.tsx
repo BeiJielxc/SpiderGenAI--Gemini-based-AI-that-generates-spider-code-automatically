@@ -102,7 +102,8 @@ const normalizeFormData = (input: Partial<CrawlerFormData> | null | undefined): 
     siteName: typeof data.siteName === 'string' ? data.siteName : '',
     listPageName: typeof data.listPageName === 'string' ? data.listPageName : '',
     sourceCredibility: typeof data.sourceCredibility === 'string' ? data.sourceCredibility : '',
-    reportUrl: typeof data.reportUrl === 'string' ? data.reportUrl : '',
+    reportUrl: typeof data.reportUrl === 'string' ? data.reportUrl
+      : (typeof data.url === 'string' ? data.url : ''),
     outputScriptName: typeof data.outputScriptName === 'string' ? data.outputScriptName : '',
     runMode: typeof data.runMode === 'string' ? data.runMode : '',
     crawlMode: typeof data.crawlMode === 'string' && data.crawlMode ? data.crawlMode : 'agent',
