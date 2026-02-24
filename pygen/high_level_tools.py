@@ -313,6 +313,186 @@ def _discover_pagination(soup: BeautifulSoup, base_url: str) -> Dict[str, Any]:
     }
 
 
+_SHADOW_DOM_EXTRACT_JS = """
+() => {
+    const hosts = [];
+    for (const el of document.querySelectorAll('*')) {
+        if (el.shadowRoot) hosts.push(el);
+    }
+    if (hosts.length === 0) return null;
+
+    let bestHost = null;
+    let bestTextLen = 0;
+    for (const h of hosts) {
+        const len = (h.shadowRoot.textContent || '').length;
+        if (len > bestTextLen) { bestTextLen = len; bestHost = h; }
+    }
+    if (!bestHost || bestTextLen < 100) return null;
+
+    const sr = bestHost.shadowRoot;
+    const hostId = bestHost.id || '';
+    const hostTag = bestHost.tagName.toLowerCase();
+
+    const SKIP_TAGS = new Set(['STYLE', 'SCRIPT', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE']);
+
+    function findCards(root, depth) {
+        if (depth > 8) return [];
+        const children = Array.from(root.children).filter(c => !SKIP_TAGS.has(c.tagName));
+        if (children.length === 0) return [];
+        const textChildren = children.filter(c => (c.innerText || '').trim().length > 30);
+        if (textChildren.length >= 3) return textChildren;
+        let best = null, bestLen = 0;
+        for (const c of children) {
+            const l = (c.innerText || '').length;
+            if (l > bestLen) { bestLen = l; best = c; }
+        }
+        if (best) return findCards(best, depth + 1);
+        return [];
+    }
+
+    const cards = findCards(sr, 0);
+    if (cards.length === 0) return { hostId, hostTag, shadowDOM: true, items: [], totalText: bestTextLen };
+
+    const items = [];
+    for (let i = 0; i < cards.length; i++) {
+        const card = cards[i];
+        const text = (card.innerText || '').trim();
+        const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+        // First line is usually source/author, second is time, rest is content
+        let source = '', timeStr = '', title = '', url = '';
+        const links = Array.from(card.querySelectorAll('a'));
+        if (links.length > 0) {
+            source = links[0].innerText.trim();
+            url = links[0].href || '';
+        }
+        // Find time-like text
+        for (const l of lines) {
+            if (/^vor\\s|ago|\\d{1,2}[\\.\\/-]\\d{1,2}[\\.\\/-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|hours?|minutes?|days?|Stunden|Minuten|Tagen/i.test(l)) {
+                timeStr = l;
+                break;
+            }
+        }
+        // Title: first substantial line that's not source or time
+        for (const l of lines) {
+            if (l !== source && l !== timeStr && l.length > 10) {
+                title = l.substring(0, 200);
+                break;
+            }
+        }
+
+        // Detect platform from links
+        let platform = '';
+        for (const a of links) {
+            const h = a.href || '';
+            if (h.includes('facebook.com')) { platform = 'facebook'; break; }
+            if (h.includes('instagram.com')) { platform = 'instagram'; break; }
+            if (h.includes('linkedin.com')) { platform = 'linkedin'; break; }
+            if (h.includes('youtube.com')) { platform = 'youtube'; break; }
+            if (h.includes('bsky.app')) { platform = 'bluesky'; break; }
+            if (h.includes('twitter.com') || h.includes('x.com')) { platform = 'twitter'; break; }
+        }
+
+        items.push({
+            index: i,
+            title: title,
+            source: source,
+            date: timeStr,
+            url: url,
+            platform: platform,
+            textPreview: text.substring(0, 300)
+        });
+    }
+
+    // Build a sample of the card HTML (first card only, truncated)
+    let sampleHtml = '';
+    if (cards.length > 0) {
+        sampleHtml = cards[0].innerHTML.substring(0, 1500);
+    }
+
+    return {
+        shadowDOM: true,
+        hostId: hostId,
+        hostTag: hostTag,
+        hostSelector: hostId ? '#' + hostId : hostTag,
+        itemCount: cards.length,
+        items: items,
+        sampleHtml: sampleHtml,
+        totalText: bestTextLen
+    };
+}
+"""
+
+
+def _build_shadow_dom_code_template(host_selector: str) -> str:
+    """Build a generic Playwright code template for extracting data from Shadow DOM."""
+    return f'''
+# --- Shadow DOM extraction (auto-generated template) ---
+# Host element: "{host_selector}"
+# This code uses page.evaluate() to pierce the Shadow DOM and extract items
+# via innerText parsing. CSS class selectors are NOT used because Shadow DOM
+# frameworks typically produce hashed class names.
+
+SHADOW_EXTRACT_JS = """
+() => {{
+    const SKIP_TAGS = new Set(['STYLE','SCRIPT','LINK','META','NOSCRIPT','TEMPLATE']);
+    function findCards(root, depth) {{
+        if (depth > 8) return [];
+        const children = Array.from(root.children).filter(c => !SKIP_TAGS.has(c.tagName));
+        if (!children.length) return [];
+        const textChildren = children.filter(c => (c.innerText || '').trim().length > 30);
+        if (textChildren.length >= 3) return textChildren;
+        let best = null, bestLen = 0;
+        for (const c of children) {{
+            const l = (c.innerText || '').length;
+            if (l > bestLen) {{ bestLen = l; best = c; }}
+        }}
+        return best ? findCards(best, depth + 1) : [];
+    }}
+
+    const host = document.querySelector('{host_selector}');
+    if (!host || !host.shadowRoot) return [];
+    const cards = findCards(host.shadowRoot, 0);
+
+    return cards.map((card, i) => {{
+        const text = (card.innerText || '').trim();
+        const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+        const links = Array.from(card.querySelectorAll('a'));
+        const firstLink = links.length > 0 ? links[0] : null;
+        const source = firstLink ? firstLink.innerText.trim() : '';
+        const sourceUrl = firstLink ? firstLink.href : '';
+        let date = '';
+        for (const l of lines) {{
+            if (/\\d{{1,2}}[\\.\\/\\-]\\d{{1,2}}[\\.\\/\\-]\\d{{2,4}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|ago|hours?|minutes?|days?|vor\\s/i.test(l)) {{
+                date = l; break;
+            }}
+        }}
+        let title = '';
+        for (const l of lines) {{
+            if (l !== source && l !== date && l.length > 10) {{
+                title = l; break;
+            }}
+        }}
+        return {{
+            index: i,
+            title: title.substring(0, 200),
+            date: date,
+            source: source,
+            sourceUrl: sourceUrl,
+            content: text
+        }};
+    }});
+}}
+"""
+
+async def extract_shadow_dom_items(page, max_items=10):
+    """Extract items from Shadow DOM using page.evaluate()."""
+    raw = await page.evaluate(SHADOW_EXTRACT_JS)
+    return raw[:max_items] if raw else []
+# --- End Shadow DOM template ---
+'''
+
+
 async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
     """
     Universal list + pagination discovery.
@@ -323,6 +503,7 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
     3. Extracts items (title, url, date) from the best candidate.
     4. Discovers pagination controls (next, prev, page numbers).
     5. Returns structured data + recommended selectors.
+    6. Falls back to Shadow DOM piercing if no list found in regular DOM.
     """
     try:
         html = await ctx.browser.get_full_html()
@@ -347,6 +528,82 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
         pagination = _discover_pagination(soup, base_url)
 
         if not candidates:
+            # Fallback: try piercing Shadow DOM
+            shadow_result = None
+            try:
+                if ctx.browser.page:
+                    shadow_result = await ctx.browser.page.evaluate(_SHADOW_DOM_EXTRACT_JS)
+                    if shadow_result:
+                        ctx.log(f"[TOOL] Shadow DOM probe: shadowDOM={shadow_result.get('shadowDOM')}, "
+                                f"items={len(shadow_result.get('items', []))}, "
+                                f"host={shadow_result.get('hostSelector', '?')}")
+                    else:
+                        ctx.log("[TOOL] Shadow DOM probe: no shadow hosts found")
+            except Exception as e:
+                ctx.log(f"[TOOL] Shadow DOM probe error: {e}")
+
+            if shadow_result and shadow_result.get("shadowDOM") and shadow_result.get("items"):
+                shadow_items = shadow_result["items"]
+                host_selector = shadow_result.get("hostSelector", "")
+
+                code_template = _build_shadow_dom_code_template(host_selector)
+
+                payload = {
+                    "baseUrl": base_url,
+                    "shadowDOM": True,
+                    "shadowHostSelector": host_selector,
+                    "bestCandidate": {
+                        "selector": f"shadow:{host_selector}",
+                        "titleSelector": "",
+                        "dateSelector": "",
+                        "score": 0,
+                        "itemCount": len(shadow_items),
+                        "hasLink": any(it.get("url") for it in shadow_items),
+                        "hasDate": any(it.get("date") for it in shadow_items),
+                    },
+                    "structureHint": (
+                        f"Content is inside Shadow DOM (host: {host_selector}). "
+                        f"Found {len(shadow_items)} cards."
+                    ),
+                    "codeTemplate": code_template,
+                    "sampleHtml": shadow_result.get("sampleHtml", ""),
+                    "items": [
+                        {
+                            "title": it.get("title", ""),
+                            "url": it.get("url", ""),
+                            "date": it.get("date", ""),
+                            "source": it.get("source", ""),
+                            "platform": it.get("platform", ""),
+                        }
+                        for it in shadow_items
+                    ],
+                    "pagination": {},
+                    "dateHints": {},
+                    "otherCandidates": [],
+                }
+
+                ctx.enhanced_analysis["list_extract"] = {
+                    "selector": f"shadow:{host_selector}",
+                    "shadowDOM": True,
+                    "shadowHostSelector": host_selector,
+                    "structureHint": payload["structureHint"],
+                    "codeTemplate": code_template,
+                    "itemCount": len(shadow_items),
+                }
+                ctx.enhanced_analysis["_last_list_items"] = payload["items"]
+
+                summary = (
+                    f"Found {len(shadow_items)} items inside Shadow DOM "
+                    f"(host: {host_selector})"
+                )
+                ctx.log(f"[TOOL] extract_list_and_pagination: {summary}")
+                return ToolResult(
+                    success=True,
+                    data=payload,
+                    summary=summary,
+                    suggested_next_tools=["generate_crawler_code"],
+                )
+
             return ToolResult(
                 success=False,
                 error="No repeating list blocks found on page",
@@ -449,13 +706,70 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
 # 2. capture_api_and_infer_params
 # =====================================================================
 
+
+def _extract_data_apis(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract data-bearing APIs from a list of captured request dicts."""
+    data_apis: List[Dict[str, Any]] = []
+    for r in requests:
+        body = r.get("response_body") or r.get("responseBody") or r.get("response_preview") or ""
+        if not body or not isinstance(body, str):
+            continue
+        try:
+            parsed = json.loads(body.strip()) if body.strip() else {}
+        except Exception:
+            continue
+
+        arrays = _find_arrays_in_json(parsed)
+        if not arrays:
+            continue
+
+        best_array = max(arrays, key=lambda a: len(a[1]))
+        arr_path, arr_data = best_array
+
+        if len(arr_data) < 2:
+            continue
+
+        item_fields = set()
+        if isinstance(arr_data[0], dict):
+            item_fields = set(arr_data[0].keys())
+
+        has_title = bool(item_fields & {"title", "name", "TITLE", "announcementTitle", "secName"})
+        has_date = bool(item_fields & {"date", "time", "publishDate", "publishTime", "announcementTime", "NOTICE_DATE"})
+
+        url_str = r.get("url", "")
+        method = r.get("method", "GET")
+        parsed_url = urlparse(url_str)
+        query_params = parse_qs(parsed_url.query)
+        post_body = r.get("postData") or r.get("post_data") or ""
+        post_params = {}
+        if post_body:
+            try:
+                post_params = json.loads(post_body)
+            except Exception:
+                post_params = dict(parse_qs(post_body))
+
+        data_apis.append({
+            "url": url_str,
+            "method": method,
+            "queryParams": {k: v[0] if len(v) == 1 else v for k, v in query_params.items()},
+            "postParams": post_params,
+            "arrayPath": arr_path,
+            "arrayLength": len(arr_data),
+            "itemFields": sorted(item_fields)[:20],
+            "hasTitle": has_title,
+            "hasDate": has_date,
+            "sampleItem": _safe_preview(arr_data[0]) if arr_data else {},
+        })
+    return data_apis
+
+
 async def tool_capture_api_and_infer_params(ctx: ToolContext) -> ToolResult:
     """
     Dynamic API sniffing + parameter attribution.
 
     Automatically:
-    1. Records current network state.
-    2. Attempts pagination interactions (click next, scroll, etc.).
+    1. Analyzes requests already captured during page load.
+    2. If none found, attempts pagination interactions (click next, scroll).
     3. Captures new XHR/Fetch requests triggered by interactions.
     4. Identifies the data-bearing API (response contains array of items).
     5. Diffs parameters between requests to infer page/category/date params.
@@ -476,115 +790,76 @@ async def tool_capture_api_and_infer_params(ctx: ToolContext) -> ToolResult:
         before_requests = list(ctx.browser.get_captured_requests().get("api_requests", []))
         before_urls = {r.get("url", "") for r in before_requests}
 
-        html_before = await page.content()
-        first_text_before = ""
-        try:
-            first_text_before = await page.evaluate("""
-                () => {
-                    const items = document.querySelectorAll('tr, li, div[class]');
-                    for (const el of items) {
-                        const text = el.innerText?.trim();
-                        if (text && text.length > 10 && text.length < 300) return text;
-                    }
-                    return '';
-                }
-            """)
-        except Exception:
-            pass
-
-        ctx.browser._clear_captured_requests()
-
         interaction_succeeded = False
+        new_requests: List[Dict[str, Any]] = []
 
-        next_selectors = [
-            ".pageNext", "a.pageNext", "a.next", ".next",
-            "a:has-text('下一页')", "a:has-text('>')", "a:has-text('Next')",
-            "button:has-text('下一页')",
-            ".pagination a:nth-child(2)",
-            "a.page-num:nth-child(2)", "a.pageNum:nth-child(2)",
-        ]
-        for sel in next_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    interaction_succeeded = True
-                    break
-            except Exception:
-                continue
+        # Phase 1: analyze requests already captured during page load
+        data_apis = _extract_data_apis(before_requests)
 
-        if not interaction_succeeded:
+        if not data_apis:
+            # Phase 2: trigger interactions to capture new requests
+            html_before = await page.content()
+            first_text_before = ""
             try:
-                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                interaction_succeeded = True
+                first_text_before = await page.evaluate("""
+                    () => {
+                        const items = document.querySelectorAll('tr, li, div[class]');
+                        for (const el of items) {
+                            const text = el.innerText?.trim();
+                            if (text && text.length > 10 && text.length < 300) return text;
+                        }
+                        return '';
+                    }
+                """)
             except Exception:
                 pass
 
-        try:
-            await page.wait_for_load_state("networkidle", timeout=8000)
-        except Exception:
-            await asyncio.sleep(3)
+            ctx.browser._clear_captured_requests()
 
-        after_requests = list(ctx.browser.get_captured_requests().get("api_requests", []))
+            interaction_succeeded = False
 
-        new_requests = []
-        for r in after_requests:
-            url = r.get("url", "")
-            if url and url not in before_urls:
-                ct = (r.get("responseHeaders", {}).get("content-type", "") or "").lower()
-                body = r.get("responseBody", "") or ""
-                if "json" in ct or body.strip().startswith(("{", "[")):
-                    new_requests.append(r)
-
-        data_apis: List[Dict[str, Any]] = []
-        for r in new_requests:
-            body = r.get("responseBody", "") or ""
-            try:
-                parsed = json.loads(body) if body.strip() else {}
-            except Exception:
-                continue
-
-            arrays = _find_arrays_in_json(parsed)
-            if not arrays:
-                continue
-
-            best_array = max(arrays, key=lambda a: len(a[1]))
-            arr_path, arr_data = best_array
-
-            if len(arr_data) < 2:
-                continue
-
-            item_fields = set()
-            if isinstance(arr_data[0], dict):
-                item_fields = set(arr_data[0].keys())
-
-            has_title = bool(item_fields & {"title", "name", "TITLE", "announcementTitle", "secName"})
-            has_date = bool(item_fields & {"date", "time", "publishDate", "publishTime", "announcementTime", "NOTICE_DATE"})
-
-            url_str = r.get("url", "")
-            method = r.get("method", "GET")
-            parsed_url = urlparse(url_str)
-            query_params = parse_qs(parsed_url.query)
-            post_body = r.get("postData", "") or ""
-            post_params = {}
-            if post_body:
+            next_selectors = [
+                ".pageNext", "a.pageNext", "a.next", ".next",
+                "a:has-text('下一页')", "a:has-text('>')", "a:has-text('Next')",
+                "button:has-text('下一页')",
+                ".pagination a:nth-child(2)",
+                "a.page-num:nth-child(2)", "a.pageNum:nth-child(2)",
+            ]
+            for sel in next_selectors:
                 try:
-                    post_params = json.loads(post_body)
+                    el = await page.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.click()
+                        interaction_succeeded = True
+                        break
                 except Exception:
-                    post_params = dict(parse_qs(post_body))
+                    continue
 
-            data_apis.append({
-                "url": url_str,
-                "method": method,
-                "queryParams": {k: v[0] if len(v) == 1 else v for k, v in query_params.items()},
-                "postParams": post_params,
-                "arrayPath": arr_path,
-                "arrayLength": len(arr_data),
-                "itemFields": sorted(item_fields)[:20],
-                "hasTitle": has_title,
-                "hasDate": has_date,
-                "sampleItem": _safe_preview(arr_data[0]) if arr_data else {},
-            })
+            if not interaction_succeeded:
+                try:
+                    await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                    interaction_succeeded = True
+                except Exception:
+                    pass
+
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                await asyncio.sleep(3)
+
+            after_requests = list(ctx.browser.get_captured_requests().get("api_requests", []))
+
+            new_requests = []
+            for r in after_requests:
+                url = r.get("url", "")
+                if url and url not in before_urls:
+                    ct = (r.get("response_headers") or r.get("responseHeaders") or {})
+                    ct = (ct.get("content-type", "") or "").lower()
+                    body = r.get("response_body") or r.get("responseBody") or r.get("response_preview") or ""
+                    if "json" in ct or body.strip().startswith(("{", "[")):
+                        new_requests.append(r)
+
+            data_apis = _extract_data_apis(new_requests)
 
         # Restore browser to original URL so subsequent tools see the same page.
         await _restore_page(page, original_url)
@@ -1009,7 +1284,7 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                     continue
                 if el:
                     text_len = len(el.get_text(strip=True))
-                    if text_len > 200:
+                    if text_len > 50:
                         content_selector = sel
                         content_tag_name = el.name
                         if el.get("class"):

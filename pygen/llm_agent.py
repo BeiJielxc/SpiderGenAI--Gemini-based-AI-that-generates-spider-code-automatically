@@ -2223,7 +2223,28 @@ if __name__ == "__main__":
     def _summarize_enhanced_analysis(self, enhanced_analysis: Dict[str, Any]) -> str:
         """生成增强分析摘要"""
         lines = []
-        
+
+        # 0. Shadow DOM 检测结果
+        list_extract = enhanced_analysis.get("list_extract", {})
+        if list_extract.get("shadowDOM"):
+            host_sel = list_extract.get("shadowHostSelector", "")
+            code_tpl = list_extract.get("codeTemplate", "")
+            lines.append("### 【关键】Shadow DOM 页面")
+            lines.append(
+                f"此页面的内容渲染在 Shadow DOM 内部（host: `{host_sel}`）。\n"
+                "**必须**使用 Playwright 的 `page.evaluate()` 配合 `element.shadowRoot` 来提取数据。\n"
+                "**不要**使用 `page.content()` + BeautifulSoup，因为它们无法穿透 Shadow DOM。\n"
+            )
+            if code_tpl:
+                lines.append(
+                    "以下是已验证可工作的提取代码模板，请直接在生成的爬虫脚本中使用：\n"
+                    "```python\n" + code_tpl.strip() + "\n```\n"
+                )
+            else:
+                hint = list_extract.get("structureHint", "")
+                if hint:
+                    lines.append(f"结构提示: {hint}\n")
+
         # 1. 【核心】已验证的分类映射表
         verified_mapping = enhanced_analysis.get("verified_category_mapping", {})
         if verified_mapping and isinstance(verified_mapping, dict):

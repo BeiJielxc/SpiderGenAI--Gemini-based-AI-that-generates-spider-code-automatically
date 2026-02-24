@@ -69,8 +69,8 @@ const mergeBatchJobPreferDefined = (base: BatchJob, patch: Partial<BatchJob>): B
 };
 
 const DEFAULT_FORM_DATA: CrawlerFormData = {
-  startDate: '2026-01-01',
-  endDate: '2026-12-31',
+  startDate: '',
+  endDate: '',
   taskObjective: '',
   siteName: '',
   listPageName: '',
@@ -93,8 +93,8 @@ const normalizeAttachments = (attachments: unknown): Attachment[] => {
 const normalizeFormData = (input: Partial<CrawlerFormData> | null | undefined): CrawlerFormData => {
   const data: any = input || {};
   return {
-    startDate: typeof data.startDate === 'string' && data.startDate ? data.startDate : DEFAULT_FORM_DATA.startDate,
-    endDate: typeof data.endDate === 'string' && data.endDate ? data.endDate : DEFAULT_FORM_DATA.endDate,
+    startDate: typeof data.startDate === 'string' ? data.startDate : DEFAULT_FORM_DATA.startDate,
+    endDate: typeof data.endDate === 'string' ? data.endDate : DEFAULT_FORM_DATA.endDate,
     taskObjective:
       (typeof data.taskObjective === 'string' && data.taskObjective) ||
       (typeof data.extraRequirements === 'string' && data.extraRequirements) ||

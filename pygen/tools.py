@@ -535,8 +535,8 @@ async def tool_get_network_requests(ctx: ToolContext) -> ToolResult:
                     "url": r.get("url", "")[:200],
                     "method": r.get("method", ""),
                     "resource_type": r.get("resourceType", ""),
-                    "status": r.get("status", ""),
-                    "response_preview": (r.get("responseBody", "") or "")[:500],
+                    "status": r.get("response_status") or r.get("status", ""),
+                    "response_preview": (r.get("response_body") or r.get("responseBody") or r.get("response_preview") or "")[:500],
                 }
                 for r in api_reqs[:10]
             ],

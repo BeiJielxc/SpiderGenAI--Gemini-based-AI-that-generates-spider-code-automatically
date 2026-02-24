@@ -158,6 +158,8 @@ class AgentPlanner:
         self.log = log_callback or (lambda msg: None)
         self._cancel_check = cancel_check or (lambda: False)
 
+        self._critic_rejected_current_code = False
+
         self._api_key = config.qwen_api_key
         self._model = config.qwen_model
         self._base_url = config.qwen_base_url
@@ -524,6 +526,7 @@ class AgentPlanner:
             self.log(f"[PLANNER] Critic passed: {verdict.summary}")
             return None
 
+        self._critic_rejected_current_code = True
         self.log(f"[PLANNER] Critic rejected finish: {verdict.summary}")
         self.log(f"[CRITIC] Issues: {[i.code for i in verdict.issues]}")
         self.log(f"[CRITIC] Recommendations: {verdict.recommendations[:3]}")
@@ -627,6 +630,9 @@ class AgentPlanner:
                 self.log(f"[PLANNER] Execute tool: {action}({json.dumps(action_input, ensure_ascii=False)[:200]})")
                 tool_result = await self.tool_registry.execute_tool(self.ctx, action, action_input)
 
+                if action == "generate_crawler_code" and tool_result.success:
+                    self._critic_rejected_current_code = False
+
                 result.tool_calls.append(
                     {
                         "iteration": iteration,
@@ -649,12 +655,17 @@ class AgentPlanner:
 
             else:
                 self.log(f"[PLANNER] Max iterations reached ({self.max_iterations})")
-                if self.ctx.generated_code:
+                if self.ctx.generated_code and not self._critic_rejected_current_code:
                     result.success = True
                     result.script_code = self.ctx.generated_code
                     result.enhanced_analysis = self.ctx.enhanced_analysis
                     result.verified_mapping = self.ctx.verified_mapping
                     result.strategy_summary = "Max iterations reached; using last generated code"
+                elif self._critic_rejected_current_code:
+                    result.error = (
+                        "Max iterations reached; generated code was rejected by Critic "
+                        "(records=0 or quality check failed)"
+                    )
                 else:
                     result.error = "Max iterations reached without generating code"
 
