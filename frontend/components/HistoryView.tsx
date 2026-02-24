@@ -178,8 +178,8 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
               const isBatch = item.taskType === 'batch';
               const title = isBatch 
                 ? `批量任务 (${(item.config as BatchJob[]).length} 个子任务)`
-                : (config.siteName || '未命名网站');
-              const subtitle = isBatch ? '' : config.reportUrl;
+                : (config.siteName || config.listPageName || '未命名网站');
+              const subtitle = isBatch ? '' : (config.reportUrl ?? (config as { url?: string }).url ?? '');
               
               return (
                 <div 
