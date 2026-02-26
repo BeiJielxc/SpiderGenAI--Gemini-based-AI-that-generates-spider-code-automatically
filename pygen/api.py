@@ -90,6 +90,9 @@ class NewsArticle(BaseModel):
     content: Optional[str] = None
     category: Optional[str] = None  # 来源板块（多页爬取时标识）
 
+class BatchDownloadRequest(BaseModel):
+    filenames: List[str]
+
 class TaskStatusResponse(BaseModel):
     taskId: str
     status: str  # 'pending' | 'queued' | 'running' | 'completed' | 'failed'
@@ -1001,12 +1004,21 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             if "logs" in result_to_save:
                 del result_to_save["logs"]
             
+            # 计算 record_count
+            record_count = 0
+            if request.runMode == "news_sentiment":
+                record_count = len(news_articles)
+            else:
+                record_count = len(reports)
+                
             await asyncio.to_thread(
                 update_history_status, 
                 task_id, 
                 "completed", 
                 result_to_save, 
-                tasks[task_id]["logs"]
+                tasks[task_id]["logs"],
+                end_at=datetime.now(),
+                record_count=record_count
             )
         except Exception as e:
             print(f"保存历史记录失败: {e}")
@@ -1026,12 +1038,24 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             if "logs" in result_to_save:
                 del result_to_save["logs"]
             
+            # 计算 record_count (safe)
+            record_count = 0
+            # 尝试从 request 中获取 runMode，若 request 是对象则直接访问，若是字典则用 get
+            _run_mode = request.runMode if hasattr(request, "runMode") else (request.get("runMode") if isinstance(request, dict) else "")
+            
+            if _run_mode == "news_sentiment":
+                record_count = len(tasks[task_id].get("newsArticles") or [])
+            else:
+                record_count = len(tasks[task_id].get("reports") or [])
+
             await asyncio.to_thread(
                 update_history_status, 
                 task_id, 
                 "failed", 
                 result_to_save, 
-                tasks[task_id]["logs"]
+                tasks[task_id]["logs"],
+                end_at=datetime.now(),
+                record_count=record_count
             )
         except Exception as e:
             print(f"保存历史记录失败: {e}")
@@ -1060,12 +1084,24 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             if "logs" in result_to_save:
                 del result_to_save["logs"]
             
+            # 计算 record_count (safe)
+            record_count = 0
+            # 尝试从 request 中获取 runMode，若 request 是对象则直接访问，若是字典则用 get
+            _run_mode = request.runMode if hasattr(request, "runMode") else (request.get("runMode") if isinstance(request, dict) else "")
+            
+            if _run_mode == "news_sentiment":
+                record_count = len(tasks[task_id].get("newsArticles") or [])
+            else:
+                record_count = len(tasks[task_id].get("reports") or [])
+
             await asyncio.to_thread(
                 update_history_status, 
                 task_id, 
                 "failed", 
                 result_to_save, 
-                tasks[task_id]["logs"]
+                tasks[task_id]["logs"],
+                end_at=datetime.now(),
+                record_count=record_count
             )
         except Exception as e:
             print(f"保存历史记录失败: {e}")
@@ -1193,7 +1229,7 @@ async def start_generation(request: GenerateRequest):
     
     # 记录到历史记录数据库
     try:
-        await asyncio.to_thread(add_history, task_id, "single", request.model_dump())
+        await asyncio.to_thread(add_history, task_id, "single", request.model_dump(), "admin")
     except Exception as e:
         print(f"写入历史记录失败: {e}")
     
@@ -1310,6 +1346,55 @@ async def download_file(filename: str):
         path=file_path,
         filename=filename,
         media_type="text/x-python"
+    )
+
+@app.post("/api/download/batch")
+async def download_batch_files(request: BatchDownloadRequest):
+    """
+    批量下载脚本文件（打包为 ZIP）
+    """
+    import io
+    import zipfile
+    
+    output_dir = config.output_dir if config else Path("./py")
+    
+    # 在内存中创建 ZIP
+    zip_buffer = io.BytesIO()
+    
+    # 检查是否有有效文件
+    valid_files_count = 0
+    
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in request.filenames:
+            # 安全检查：防止路径遍历
+            safe_name = Path(filename).name
+            file_path = output_dir / safe_name
+            
+            if file_path.exists() and file_path.is_file():
+                try:
+                    # 将文件写入 ZIP，arcname 为 ZIP 内的文件名
+                    zf.write(file_path, arcname=safe_name)
+                    valid_files_count += 1
+                except Exception as e:
+                    print(f"[WARNING] 添加文件到 ZIP 失败: {filename} - {e}")
+            else:
+                print(f"[WARNING] 批量下载跳过不存在的文件: {filename}")
+    
+    if valid_files_count == 0:
+        raise HTTPException(status_code=404, detail="选中的文件均不存在")
+
+    # 指针回到开头
+    zip_buffer.seek(0)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"scripts_batch_{timestamp}.zip"
+    
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename={zip_filename}"
+        }
     )
 
 
@@ -1498,7 +1583,24 @@ async def stop_task(task_id: str):
         result_to_save = task.copy()
         if "logs" in result_to_save:
             del result_to_save["logs"]
-        await asyncio.to_thread(update_history_status, task_id, "failed", result_to_save, task["logs"])
+        
+        # 计算 record_count
+        record_count = 0
+        _req = task.get("request", {})
+        if _req.get("runMode") == "news_sentiment":
+            record_count = len(task.get("newsArticles") or [])
+        else:
+            record_count = len(task.get("reports") or [])
+            
+        await asyncio.to_thread(
+            update_history_status, 
+            task_id, 
+            "failed", 
+            result_to_save, 
+            task["logs"],
+            end_at=datetime.now(),
+            record_count=record_count
+        )
     except Exception as e:
         print(f"更新历史记录失败: {e}")
 
@@ -1592,6 +1694,9 @@ class HistoryLogRequest(BaseModel):
     config: Any
     result: Optional[Any] = None
     logs: Optional[List[str]] = None
+    endAt: Optional[datetime] = None
+    recordCount: Optional[int] = None
+    owner: Optional[str] = "admin"
 
 @app.post("/api/history/log")
 async def log_history(request: HistoryLogRequest):
@@ -1607,14 +1712,17 @@ async def log_history(request: HistoryLogRequest):
                 request.id, 
                 request.status, 
                 request.result or request.config, # Batch 任务 result 往往就是更新后的 config (jobs)
-                request.logs
+                request.logs,
+                request.endAt,
+                request.recordCount
             )
         else:
             await asyncio.to_thread(
                 add_history, 
                 request.id, 
                 request.taskType, 
-                request.config
+                request.config,
+                request.owner or "admin"
             )
         return {"message": "ok"}
     except Exception as e:

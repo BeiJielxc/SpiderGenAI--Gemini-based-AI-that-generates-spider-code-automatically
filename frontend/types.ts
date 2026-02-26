@@ -185,6 +185,9 @@ export interface HistoryItem {
   taskType: 'single' | 'batch';
   status: 'pending' | 'running' | 'completed' | 'failed';
   createdAt: string;
+  endAt?: string;
+  owner?: string;
+  recordCount?: number;
   config: CrawlerFormData | BatchJob[];
   result?: any;
   logs?: string[];

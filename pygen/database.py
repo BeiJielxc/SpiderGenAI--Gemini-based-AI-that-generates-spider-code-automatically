@@ -15,6 +15,9 @@ def init_db():
             task_type TEXT,  -- 'single' or 'batch'
             status TEXT,     -- 'pending', 'running', 'completed', 'failed'
             created_at TIMESTAMP,
+            end_at TIMESTAMP,
+            owner TEXT DEFAULT 'admin',
+            record_count INTEGER,
             config TEXT,     -- JSON string of request/config
             result TEXT,     -- JSON string of results
             logs TEXT        -- JSON string of logs (optional, maybe too large?)
@@ -22,18 +25,45 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+    migrate_db()
 
-def add_history(task_id, task_type, config_data):
+def migrate_db():
+    """检查并添加缺少的字段（针对旧数据库）"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(history)")
+        columns = [row[1] for row in c.fetchall()]
+        
+        if "end_at" not in columns:
+            print("正在迁移数据库: 添加 end_at 字段...")
+            c.execute("ALTER TABLE history ADD COLUMN end_at TIMESTAMP")
+            
+        if "owner" not in columns:
+            print("正在迁移数据库: 添加 owner 字段...")
+            c.execute("ALTER TABLE history ADD COLUMN owner TEXT DEFAULT 'admin'")
+            
+        if "record_count" not in columns:
+            print("正在迁移数据库: 添加 record_count 字段...")
+            c.execute("ALTER TABLE history ADD COLUMN record_count INTEGER")
+            
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"数据库迁移失败: {e}")
+
+def add_history(task_id, task_type, config_data, owner="admin"):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
-        INSERT INTO history (id, task_type, status, created_at, config, result, logs)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO history (id, task_type, status, created_at, owner, config, result, logs)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         task_id, 
         task_type, 
         'pending', 
         datetime.now(), 
+        owner,
         json.dumps(config_data, ensure_ascii=False), 
         '{}', 
         '[]'
@@ -41,7 +71,7 @@ def add_history(task_id, task_type, config_data):
     conn.commit()
     conn.close()
 
-def update_history_status(task_id, status, result=None, logs=None):
+def update_history_status(task_id, status, result=None, logs=None, end_at=None, record_count=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     updates = []
@@ -57,6 +87,14 @@ def update_history_status(task_id, status, result=None, logs=None):
     if logs is not None:
         updates.append("logs = ?")
         params.append(json.dumps(logs, ensure_ascii=False))
+    
+    if end_at is not None:
+        updates.append("end_at = ?")
+        params.append(end_at)
+        
+    if record_count is not None:
+        updates.append("record_count = ?")
+        params.append(record_count)
         
     params.append(task_id)
     
@@ -80,6 +118,9 @@ def get_all_history():
             "taskType": row["task_type"],
             "status": row["status"],
             "createdAt": row["created_at"],
+            "endAt": row["end_at"] if "end_at" in row.keys() else None,
+            "owner": row["owner"] if "owner" in row.keys() else "admin",
+            "recordCount": row["record_count"] if "record_count" in row.keys() else None,
             "config": json.loads(row["config"]),
             "result": json.loads(row["result"]) if row["result"] else {},
             # logs usually not needed for list view
@@ -100,6 +141,9 @@ def get_history_detail(task_id):
             "taskType": row["task_type"],
             "status": row["status"],
             "createdAt": row["created_at"],
+            "endAt": row["end_at"] if "end_at" in row.keys() else None,
+            "owner": row["owner"] if "owner" in row.keys() else "admin",
+            "recordCount": row["record_count"] if "record_count" in row.keys() else None,
             "config": json.loads(row["config"]),
             "result": json.loads(row["result"]) if row["result"] else {},
             "logs": json.loads(row["logs"]) if row["logs"] else []

@@ -13,8 +13,11 @@ import {
   Eye,
   Trash2,
   RefreshCw,
-  MoreHorizontal,
-  ChevronRight
+  Download,
+  CheckSquare,
+  Square,
+  User,
+  FileCode
 } from 'lucide-react';
 import { API_BASE_URL, HistoryItem, CrawlerFormData, BatchJob } from '../types';
 
@@ -29,7 +32,7 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [selectedItem, setSelectedItem] = useState<HistoryItem | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -43,6 +46,7 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
       if (res.ok) {
         const data = await res.json();
         setHistory(data);
+        setSelectedIds(new Set()); // Clear selection on refresh
       }
     } catch (err) {
       console.error('Failed to fetch history:', err);
@@ -51,13 +55,10 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
     }
   };
 
-  const deleteHistoryItem = async (item: HistoryItem) => {
-    const confirmed = window.confirm('确定删除该历史记录吗？删除后不可恢复。');
-    if (!confirmed) return;
-
+  const deleteHistoryItem = async (id: string) => {
     try {
-      setDeletingIds((prev) => new Set(prev).add(item.id));
-      const res = await fetch(`${API_BASE_URL}/api/history/${encodeURIComponent(item.id)}`, {
+      setDeletingIds((prev) => new Set(prev).add(id));
+      const res = await fetch(`${API_BASE_URL}/api/history/${encodeURIComponent(id)}`, {
         method: 'DELETE'
       });
 
@@ -67,52 +68,207 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
           const errData = await res.json();
           if (errData?.detail) errMsg = errData.detail;
         } catch {
-          // ignore parse error, use status code
+          // ignore parse error
         }
         throw new Error(errMsg);
       }
 
-      setHistory((prev) => prev.filter((historyItem) => historyItem.id !== item.id));
-      if (selectedItem?.id === item.id) {
-        setSelectedItem(null);
-      }
+      setHistory((prev) => prev.filter((item) => item.id !== id));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     } catch (err) {
-      console.error('Failed to delete history item:', err);
-      alert('删除失败，请稍后重试。');
+      console.error(`Failed to delete item ${id}:`, err);
     } finally {
       setDeletingIds((prev) => {
         const next = new Set(prev);
-        next.delete(item.id);
+        next.delete(id);
         return next;
       });
     }
   };
 
+  const handleDeleteSingle = async (item: HistoryItem) => {
+    const confirmed = window.confirm('确定删除该历史记录吗？删除后不可恢复。');
+    if (!confirmed) return;
+    await deleteHistoryItem(item.id);
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    const confirmed = window.confirm(`确定删除选中的 ${selectedIds.size} 条记录吗？删除后不可恢复。`);
+    if (!confirmed) return;
+
+    const ids = Array.from(selectedIds);
+    await Promise.all(ids.map(id => deleteHistoryItem(id)));
+  };
+
+  const handleExportCSV = () => {
+    if (selectedIds.size === 0) return;
+    
+    const itemsToExport = history.filter(item => selectedIds.has(item.id));
+    
+    const columns = [
+      'owner',
+      '任务id',
+      '任务创建时间',
+      '任务完成时间',
+      '爬取数量',
+      '数据开始时间',
+      '数据结束时间',
+      '任务目标',
+      '官网名称',
+      '报告页面链接',
+      '列表页面名称',
+      '信息源可信度',
+      '运行模式',
+      '是否下载文件',
+      '任务状态'
+    ];
+
+    const csvRows = [columns.join(',')];
+    
+    itemsToExport.forEach(item => {
+      const config = item.config as CrawlerFormData; 
+      const isBatch = item.taskType === 'batch';
+      const conf = isBatch ? (item.config as BatchJob[])[0] : (item.config as CrawlerFormData);
+      
+      const row = [
+        item.owner || 'admin',
+        item.id,
+        item.createdAt ? new Date(item.createdAt).toLocaleString() : '',
+        item.endAt ? new Date(item.endAt).toLocaleString() : '',
+        item.recordCount || 0,
+        conf?.startDate || '',
+        conf?.endDate || '',
+        (conf?.taskObjective || '').replace(/"/g, '""').replace(/\n/g, ' '),
+        (conf?.siteName || '').replace(/"/g, '""'),
+        (conf?.url || conf?.reportUrl || '').replace(/"/g, '""'),
+        (conf?.listPageName || '').replace(/"/g, '""'),
+        conf?.sourceCredibility || '',
+        conf?.runMode || '',
+        conf?.downloadReport === 'yes' ? '是' : '否',
+        getStatusText(item.status)
+      ];
+      
+      const escapedRow = row.map(field => {
+        const str = String(field);
+        if (str.includes(',')) return `"${str}"`;
+        return str;
+      });
+      
+      csvRows.push(escapedRow.join(','));
+    });
+
+    const blob = new Blob(["\uFEFF" + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `history_export_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleDownloadScript = (item: HistoryItem) => {
+    // 仅支持单任务或简单结构的配置获取脚本名
+    const config = item.taskType === 'single' ? item.config as CrawlerFormData : (item.config as BatchJob[])[0];
+    let filename = config.outputScriptName;
+    
+    if (!filename) {
+      alert('未找到脚本文件名');
+      return;
+    }
+    if (!filename.endsWith('.py')) {
+      filename += '.py';
+    }
+    
+    // 打开下载链接
+    window.open(`${API_BASE_URL}/api/download/${encodeURIComponent(filename)}`, '_blank');
+  };
+
+  const handleBatchDownloadScripts = async () => {
+    if (selectedIds.size === 0) return;
+    
+    const items = history.filter(item => selectedIds.has(item.id));
+    // 收集所有有效的文件名
+    const filenames = items.map(item => {
+      const config = item.taskType === 'single' ? item.config as CrawlerFormData : (item.config as BatchJob[])[0];
+      let name = config.outputScriptName;
+      if (name && !name.endsWith('.py')) name += '.py';
+      return name;
+    }).filter(Boolean) as string[];
+
+    if (filenames.length === 0) {
+      alert('选中的记录中没有有效的脚本文件信息');
+      return;
+    }
+
+    try {
+      // 调用后端打包接口
+      const res = await fetch(`${API_BASE_URL}/api/download/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filenames })
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      // 接收 blob 并触发下载
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `scripts_batch_${new Date().toISOString().slice(0,10)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error('Batch download failed:', err);
+      alert('批量下载失败，可能部分文件不存在');
+    }
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredHistory.length && filteredHistory.length > 0) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredHistory.map(item => item.id)));
+    }
+  };
+
   const filteredHistory = history.filter(item => {
+    const config = item.taskType === 'single' ? (item.config as CrawlerFormData) : null;
     const matchesSearch = 
       item.id.toLowerCase().includes(search.toLowerCase()) ||
-      (item.taskType === 'single' && (item.config as CrawlerFormData).siteName?.toLowerCase().includes(search.toLowerCase())) ||
-      (item.taskType === 'single' && (item.config as CrawlerFormData).reportUrl?.toLowerCase().includes(search.toLowerCase()));
+      (config && config.siteName?.toLowerCase().includes(search.toLowerCase())) ||
+      (config && (config.url || config.reportUrl)?.toLowerCase().includes(search.toLowerCase()));
     
     const matchesStatus = filterStatus === 'all' || item.status === filterStatus;
     
     return matchesSearch && matchesStatus;
   });
 
-  const formatDate = (dateStr: string) => {
+  const formatDate = (dateStr?: string) => {
+    if (!dateStr) return '-';
     try {
       return new Date(dateStr).toLocaleString();
     } catch {
       return dateStr;
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'completed': return <CheckCircle2 size={18} className="text-emerald-500" />;
-      case 'failed': return <XCircle size={18} className="text-red-500" />;
-      case 'running': return <Loader2 size={18} className="text-blue-500 animate-spin" />;
-      default: return <Clock size={18} className="text-amber-500" />;
     }
   };
 
@@ -155,26 +311,71 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
           </div>
         </div>
         
-        <button 
-          onClick={fetchHistory}
-          className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors"
-          title="刷新"
-        >
-          <RefreshCw size={20} />
-        </button>
+        <div className="flex items-center gap-3">
+          {selectedIds.size > 0 && (
+            <>
+              <span className="text-sm text-gray-500 mr-2">已选 {selectedIds.size} 项</span>
+              
+              <button
+                onClick={handleBatchDownloadScripts}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                <FileCode size={16} />
+                批量下载脚本
+              </button>
+
+              <button
+                onClick={handleExportCSV}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm"
+              >
+                <Download size={16} />
+                导出 CSV
+              </button>
+              
+              <button
+                onClick={handleBatchDelete}
+                className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100 text-sm"
+              >
+                <Trash2 size={16} />
+                批量删除
+              </button>
+              <div className="w-px h-6 bg-gray-300 mx-2"></div>
+            </>
+          )}
+          <button 
+            onClick={fetchHistory}
+            className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors"
+            title="刷新"
+          >
+            <RefreshCw size={20} />
+          </button>
+        </div>
       </div>
 
       {/* Toolbar */}
       <div className="px-6 py-4 bg-white border-b border-gray-100 flex flex-col md:flex-row gap-4 justify-between items-center">
-        <div className="relative w-full md:w-96">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-          <input 
-            type="text" 
-            placeholder="搜索任务 ID、网站名称、URL..." 
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:border-indigo-500 transition-colors"
-          />
+        <div className="flex items-center gap-4 w-full md:w-auto">
+          <button
+            onClick={toggleSelectAll}
+            className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
+          >
+            {selectedIds.size > 0 && selectedIds.size === filteredHistory.length ? (
+              <CheckSquare size={18} className="text-indigo-600" />
+            ) : (
+              <Square size={18} className="text-gray-400" />
+            )}
+            全选
+          </button>
+          <div className="relative w-full md:w-96">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="搜索任务 ID、网站名称、URL..." 
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:border-indigo-500 transition-colors"
+            />
+          </div>
         </div>
         
         <div className="flex gap-2 w-full md:w-auto overflow-x-auto pb-1 md:pb-0">
@@ -212,92 +413,152 @@ const HistoryView: React.FC<HistoryViewProps> = ({ onBack, onRerun, onViewResult
         ) : (
           <div className="grid grid-cols-1 gap-4">
             {filteredHistory.map((item) => {
-              const config = item.config as CrawlerFormData; // Assuming single for now
-              // If batch, config is array. Simplified handling:
+              const config = item.config as CrawlerFormData; 
               const isBatch = item.taskType === 'batch';
               const title = isBatch 
                 ? `批量任务 (${(item.config as BatchJob[]).length} 个子任务)`
                 : (config.siteName || config.listPageName || '未命名网站');
-              const subtitle = isBatch ? '' : (config.reportUrl ?? (config as { url?: string }).url ?? '');
+              const url = isBatch ? '' : (config.reportUrl || (config as any).url || '');
               
               return (
                 <div 
                   key={item.id}
-                  className="bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all p-5 flex flex-col md:flex-row gap-5 items-start md:items-center group"
+                  className={`bg-white rounded-xl border shadow-sm transition-all p-5 flex gap-4 group ${
+                    selectedIds.has(item.id) ? 'border-indigo-300 ring-1 ring-indigo-100 bg-indigo-50/10' : 'border-gray-200 hover:shadow-md'
+                  }`}
                 >
-                  {/* Status & Icon */}
-                  <div className={`shrink-0 p-3 rounded-xl ${
-                    item.status === 'completed' ? 'bg-emerald-50 text-emerald-600' :
-                    item.status === 'failed' ? 'bg-red-50 text-red-600' :
-                    item.status === 'running' ? 'bg-blue-50 text-blue-600' :
-                    'bg-amber-50 text-amber-600'
-                  }`}>
-                    {item.taskType === 'batch' ? <FileText size={24} /> : <ExternalLink size={24} />}
+                  {/* Selection Checkbox */}
+                  <div className="pt-1">
+                    <button 
+                      onClick={() => toggleSelection(item.id)}
+                      className="text-gray-400 hover:text-indigo-600 transition-colors"
+                    >
+                      {selectedIds.has(item.id) ? (
+                        <CheckSquare size={20} className="text-indigo-600" />
+                      ) : (
+                        <Square size={20} />
+                      )}
+                    </button>
                   </div>
 
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-1">
+                  <div className="flex-1 min-w-0 flex flex-col gap-3">
+                    {/* Top Row: Title, Status, ID, Owner */}
+                    <div className="flex flex-wrap items-center gap-3">
                       <h3 className="text-lg font-bold text-gray-800 truncate">{title}</h3>
                       <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusClass(item.status)}`}>
                         {getStatusText(item.status)}
                       </span>
-                      <span className="text-xs text-gray-400 font-mono bg-gray-50 px-2 py-0.5 rounded border border-gray-100">
-                        {item.id}
-                      </span>
+                      <div className="flex items-center gap-2 text-xs text-gray-400 font-mono bg-gray-50 px-2 py-0.5 rounded border border-gray-100">
+                        <span>ID: {item.id}</span>
+                        {item.owner && (
+                          <>
+                            <span className="w-px h-3 bg-gray-300"></span>
+                            <span className="flex items-center gap-1 text-indigo-400">
+                              <User size={10} />
+                              {item.owner}
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
-                    
-                    <div className="text-sm text-gray-500 truncate mb-2">
-                      {subtitle || '无 URL 信息'}
+
+                    {/* URL */}
+                    <div className="text-sm text-gray-500 truncate flex items-center gap-1">
+                      <ExternalLink size={12} />
+                      <a href={url} target="_blank" rel="noopener noreferrer" className="hover:text-indigo-600 hover:underline">
+                        {url || '无 URL 信息'}
+                      </a>
                     </div>
-                    
-                    <div className="flex flex-wrap items-center gap-4 text-xs text-gray-400">
-                      <span className="flex items-center gap-1">
-                        <Calendar size={12} />
-                        {formatDate(item.createdAt)}
+
+                    {/* Config Badges */}
+                    {!isBatch && (
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200">
+                          {config.runMode === 'enterprise_report' ? '企业报告' : '新闻舆情'}
+                        </span>
+                        <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200">
+                          Agent 模式
+                        </span>
+                        {(config.startDate || config.endDate) && (
+                          <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200 flex items-center gap-1">
+                            <Calendar size={10} />
+                            {config.startDate || '?'} ~ {config.endDate || '?'}
+                          </span>
+                        )}
+                        {config.sourceCredibility && (
+                          <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-100">
+                            信誉: {config.sourceCredibility}
+                          </span>
+                        )}
+                        {config.downloadReport === 'yes' && (
+                          <span className="bg-emerald-50 text-emerald-700 px-2 py-1 rounded border border-emerald-100 flex items-center gap-1">
+                            <Download size={10} /> 下载报告
+                          </span>
+                        )}
+                        {config.taskObjective && (
+                          <span className="bg-amber-50 text-amber-800 px-2 py-1 rounded border border-amber-100 max-w-xs truncate" title={config.taskObjective}>
+                            目标: {config.taskObjective}
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Time & Stats */}
+                    <div className="flex flex-wrap items-center gap-4 text-xs text-gray-400 mt-1">
+                      <span className="flex items-center gap-1" title="开始时间">
+                        <Clock size={12} />
+                        开始: {formatDate(item.createdAt)}
                       </span>
-                      {isBatch ? (
-                        <span className="bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded">批量模式</span>
-                      ) : (
-                        <>
-                           <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
-                             {config.runMode === 'enterprise_report' ? '企业报告' : '新闻舆情'}
-                           </span>
-                           <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
-                             Agent 模式
-                           </span>
-                        </>
+                      {item.endAt && (
+                        <span className="flex items-center gap-1" title="结束时间">
+                          <CheckCircle2 size={12} />
+                          结束: {formatDate(item.endAt)}
+                        </span>
+                      )}
+                      {typeof item.recordCount === 'number' && (
+                        <span className="flex items-center gap-1 bg-gray-100 px-2 py-0.5 rounded text-gray-600 font-medium">
+                          <FileText size={12} />
+                          爬取数量: {item.recordCount}
+                        </span>
                       )}
                     </div>
                   </div>
 
                   {/* Actions */}
-                  <div className="flex items-center gap-3 w-full md:w-auto mt-2 md:mt-0 border-t md:border-t-0 border-gray-100 pt-3 md:pt-0">
+                  <div className="flex flex-col gap-2 justify-center border-l pl-4 border-gray-100 min-w-[120px]">
                     <button
                       onClick={() => onViewResult(item)}
-                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:text-indigo-600 hover:border-indigo-200 transition-colors text-sm font-medium"
+                      className="flex items-center justify-center gap-2 px-3 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:text-indigo-600 hover:border-indigo-200 transition-colors text-xs font-medium"
                     >
-                      <Eye size={16} />
+                      <Eye size={14} />
                       查看详情
                     </button>
                     
+                    <button
+                      onClick={() => handleDownloadScript(item)}
+                      className="flex items-center justify-center gap-2 px-3 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:text-blue-600 hover:border-blue-200 transition-colors text-xs font-medium"
+                    >
+                      <Download size={14} />
+                      下载脚本
+                    </button>
+
                     {!isBatch && (
                       <button
                         onClick={() => onRerun(config)}
-                        className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors text-sm font-medium"
+                        className="flex items-center justify-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-lg hover:bg-indigo-100 transition-colors text-xs font-medium"
                       >
-                        <PlayCircle size={16} />
+                        <RefreshCw size={14} />
                         重新运行
                       </button>
                     )}
 
                     <button
-                      onClick={() => deleteHistoryItem(item)}
+                      onClick={() => handleDeleteSingle(item)}
                       disabled={deletingIds.has(item.id)}
-                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-4 py-2 bg-white border border-red-100 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex items-center justify-center gap-2 px-3 py-1.5 bg-white border border-red-100 text-red-600 rounded-lg hover:bg-red-50 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <Trash2 size={16} />
-                      {deletingIds.has(item.id) ? '删除中...' : '删除'}
+                      <Trash2 size={14} />
+                      删除
                     </button>
                   </div>
                 </div>

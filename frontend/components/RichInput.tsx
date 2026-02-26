@@ -12,6 +12,8 @@ interface RichInputProps {
   name: string;
   placeholder?: string;
   className?: string;
+  clearable?: boolean;
+  onClear?: () => void;
 }
 
 // 将文件转换为 base64
@@ -38,8 +40,18 @@ const RichInput: React.FC<RichInputProps> = ({
   onRemoveFile,
   name,
   placeholder,
-  className = ''
+  className = '',
+  clearable = false,
+  onClear
 }) => {
+  const hasContent = (value && String(value).trim().length > 0) || attachedFiles.length > 0;
+  const showClearButton = clearable && hasContent;
+
+  const handleClear = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onClear) onClear();
+  };
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -96,7 +108,7 @@ const RichInput: React.FC<RichInputProps> = ({
       <label className="text-sm font-medium text-gray-700 ml-1">
         {label}
       </label>
-      <div className="
+      <div className="relative
         w-full bg-white text-gray-800 border border-gray-200 rounded-xl
         focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-100
         transition-all duration-200 shadow-sm hover:border-gray-300
@@ -109,8 +121,17 @@ const RichInput: React.FC<RichInputProps> = ({
           onChange={onChange}
           onPaste={handlePaste}
           placeholder={placeholder || "请输入内容，支持直接粘贴截图 (Ctrl+V)..."}
-          className="w-full p-4 min-h-[100px] outline-none resize-y placeholder:text-gray-300 text-sm leading-relaxed bg-white"
+          className={`w-full p-4 min-h-[100px] outline-none resize-y placeholder:text-gray-300 text-sm leading-relaxed bg-white ${showClearButton ? 'pr-10' : ''}`}
         />
+        {showClearButton && (
+          <button
+            type="button"
+            onClick={handleClear}
+            className="absolute right-3 top-3 text-gray-400 hover:text-gray-600 transition-colors p-1"
+          >
+            <X size={16} />
+          </button>
+        )}
         
         {/* Attachments Preview List */}
         {attachedFiles.length > 0 && (

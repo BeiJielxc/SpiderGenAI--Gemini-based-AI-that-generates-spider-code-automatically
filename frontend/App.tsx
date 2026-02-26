@@ -538,6 +538,8 @@ const App: React.FC = () => {
                     onRemoveFile={handleRemoveFile}
                     attachedFiles={formData.attachments}
                     className="md:col-span-2"
+                    clearable
+                    onClear={() => setFormData(prev => ({ ...prev, taskObjective: '', attachments: [] }))}
                   />
 
                   {/* Row 3: 站点信息（3列） */}
@@ -550,6 +552,8 @@ const App: React.FC = () => {
                       value={formData.siteName}
                       onChange={handleChange}
                       icon={<Globe size={18} />}
+                      clearable
+                      onClear={() => setFormData(prev => ({ ...prev, siteName: '' }))}
                     />
                     
                     <FormInput
@@ -560,6 +564,8 @@ const App: React.FC = () => {
                       value={formData.listPageName}
                       onChange={handleChange}
                       icon={<LayoutList size={18} />}
+                      clearable
+                      onClear={() => setFormData(prev => ({ ...prev, listPageName: '' }))}
                     />
 
                     <SelectInput
