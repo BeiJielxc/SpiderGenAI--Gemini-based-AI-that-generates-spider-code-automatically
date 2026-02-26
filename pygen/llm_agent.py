@@ -1116,60 +1116,58 @@ def fetch_data():
 3. **健壮性**：包含错误处理、重试机制、请求间隔
 4. **可读性**：代码要有清晰的中文注释
 
-## 技术选型策略
+## 技术选型策略（双轨制）
 
-### 【硬约束】平台兼容性与反爬虫（防崩溃/防拦截）
-1. **禁止在 print() 输出中使用 Emoji 表情**（如 🚀, ✅, ❌, ⚠️ 等）。
-   - Windows 默认控制台 (GBK) 无法编码这些字符，会导致 `UnicodeEncodeError` 并使程序崩溃。
-   - 只能使用标准 ASCII 字符、中文字符或标准标点。
+你只需要在以下两种技术方案中通过逻辑判断选择一种：
+
+### 方案一：API 直接调用（最高优先级）
+- **触发条件**：如果你在"捕获的网络请求"中发现了返回 JSON 数据的 API 接口（包含所需的列表或详情数据）。
+- **工具库**：`import requests`
+- **要求**：直接构造 HTTP 请求获取 JSON，**不要**启动浏览器。
+
+### 方案二：Playwright 浏览器自动化（所有 HTML 解析场景）
+- **触发条件**：没有可用的 JSON API，必须从 HTML 页面中提取数据。
+- **工具库**：`from playwright.sync_api import sync_playwright`
+- **严禁使用**：**绝对禁止**使用 `BeautifulSoup`、`requests-html` 或 `lxml` 解析 HTML。即使页面看起来是静态的，也必须使用 Playwright。
+- **优势利用**：你可以自由使用 Playwright 支持的高级选择器（如 `:has-text(...)`, `:visible`, XPath），无需担心语法兼容性问题。
+- **反爬配置**：必须使用 `headless=True` 并添加 `args=["--disable-blink-features=AutomationControlled"]`。在 `browser.new_context()` 中设置标准 User-Agent 和 `extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}`。在 `page.goto` 后必须添加等待（如 `page.wait_for_timeout(3000)`）。
+
+### 总结
+- **要么 requests (API/JSON)**
+- **要么 Playwright (Page/HTML)**
+- **不要混合**（不要用 requests 下载 HTML 再给 Playwright，也不要用 requests 下载 HTML 给 BeautifulSoup）。
+
+### 【硬约束】平台兼容性（防崩溃）
+1. **禁止在 print() 输出中使用 Emoji 表情**（如 🚀, ✅, ❌, ⚠️ 等）。Windows 默认控制台 (GBK) 无法编码，会导致 `UnicodeEncodeError`。只能使用 `[INFO]`, `[ERROR]` 等纯文本。
 2. 确保文件编码声明为 `# -*- coding: utf-8 -*-`（模板已包含）。
-3. **【必须】Playwright 无头模式与反爬配置**：
-   - 如果代码中使用 Playwright，**必须**设置 `headless=True`。
-   - **必须**添加 `--disable-blink-features=AutomationControlled` 启动参数。
-   - **必须**在 context 中设置标准的 User-Agent。
-   - **【反爬兜底】使用 Playwright 内置反爬配置即可**（不要使用 playwright-stealth 库，它有版本兼容问题）：
-     ```python
-     # 在 browser.new_context() 中配置反爬参数即可，不需要额外库
-     context = browser.new_context(
-         viewport={'width': 1920, 'height': 1080},
-         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-         # 禁用 webdriver 检测
-         extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
-     )
-     ```
-   - 在 `page.goto` 后，**必须**添加随机等待或显式等待（如 `page.wait_for_timeout(3000)`）。
-
-### 【硬约束】优先级规则（必须严格遵守）
-
-1. **优先使用API方式（最高优先级）**：
-   - 如果"捕获的网络请求"部分提供了 API 请求信息，**必须**使用 `requests` 直接调用该 API
-   - **绝对禁止**在有 API 可用时使用 BeautifulSoup 解析 HTML
-   - API 返回 JSON 数据，直接从 JSON 中提取字段，不需要解析 HTML
-   - 动态加载页面的表格数据在初始 HTML 中是空的，BeautifulSoup 只能看到空表格
-
-2. **静态页面**：仅当没有检测到 API 请求时，才使用 `requests + BeautifulSoup`
-   - 这种情况下数据直接嵌入在 HTML 源码中
-   
-3. **动态页面（按需使用 Playwright）**：当且仅当出现下列情况之一时使用 `playwright`：
-   - API **没有**日期字段，或日期字段在样例中为 `null/None`
-   - 页面结构摘要中提供了 **"📅📄 日期-条目关联样本"**（说明日期来自渲染后的DOM）
-   - 页面为 SPA（摘要中有 `hasHashRoute/hasAppRoot` 线索）
-   使用方式应尽量"**只为日期使用浏览器**"，主数据仍优先走 API，以平衡性能与正确率。
 
 ### 常见错误（必须避免）
 
 ```python
-# ❌ 错误：有 API 可用但用 BeautifulSoup 解析 HTML
-response = requests.get("https://example.com/list.html")
-soup = BeautifulSoup(response.text, 'html.parser')
-rows = soup.select('table tbody tr')  # 表格是空的！数据通过 API 加载
+# ❌ 错误：有 API 可用却用 Playwright 去抓页面（浪费资源）
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto("https://example.com/list")  # 该站有 JSON API，不应启动浏览器
 
-# ✅ 正确：直接调用 API 获取 JSON
+# ❌ 错误：用 requests 下载 HTML 再用 BeautifulSoup 解析（已禁止）
+response = requests.get("https://example.com/news.html")
+soup = BeautifulSoup(response.text, 'html.parser')  # 严禁：HTML 解析必须用 Playwright
+
+# ✅ 正确：有 API 就用 requests
 response = requests.get("https://example.com/api/list", params={"page": 1})
 data = response.json()
 for item in data["rows"]:
     name = item["title"]
     date = item["rankdate"]
+
+# ✅ 正确：无 API、需解析 HTML 时用 Playwright
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+    page = browser.new_page()
+    page.goto(url)
+    page.wait_for_timeout(2000)
+    items = page.locator(".news-item").all()
 ```
 
 ## 【硬约束】系统兼容性与稳定性（防止崩溃）
@@ -1261,27 +1259,19 @@ CATEGORIES = {
      - 最后才允许"按顺序"关联，但必须在代码注释中说明风险，并且要做长度一致性检查（不一致则留空）。
 - **严禁**用 `requests.get()` 去抓 SPA 的主页 HTML 再用正则找日期（这通常拿不到渲染后的内容，会导致 0 个日期）。
 
-### 【重要】静态 HTML 页面直接从 requests 响应中提取日期
-- 条件：页面是**服务端渲染的静态 HTML**（不是 SPA），日期直接在 HTML 源码中可见。
-- **优先方案**：在同一个函数中直接提取日期，不要分成两个阶段！
-  - 在 `fetch_page_data` 函数中遍历表格行时，直接使用 `_pygen_smart_find_date_in_row_bs4(tds)` 提取日期
-  - 日期和其他字段（标题、下载链接）在同一个循环中一起提取并存入记录
-  - **不要**先获取所有记录再用 Playwright 单独提取日期，这会导致分页日期丢失！
-- 示例代码：
+### 【重要】使用 Playwright 解析列表页时，在同一个循环内提取日期
+- 当用 Playwright 解析列表/表格页时，**在遍历条目的同一循环内**直接提取日期，不要分成两阶段。
+- 表格行：对每行 `query_selector_all('td')` 后使用 `_pygen_smart_find_date_in_row_pw(tds)` 提取日期。
+- 卡片/列表：在每条目的容器内用 `locator` 或 `query_selector` 定位日期元素后取 `inner_text()`，用正则或 `_pygen_normalize_date` 标准化。
+- 示例（Playwright 表格）：
 ```python
-def fetch_page_data(page_num):
-    # ... 获取 HTML ...
-    for row in rows:
-        tds = row.select('td')
-        name = tds[0].get_text(strip=True)
-        date = _pygen_smart_find_date_in_row_bs4(tds)  # 直接在这里提取日期！
-        download_url = ...
-        reports.append({
-            "name": name,
-            "date": date,  # 日期已经在这里了
-            "downloadUrl": download_url,
-            "fileType": file_type
-        })
+rows = page.locator("table tbody tr").all()
+for row in rows:
+    tds = row.query_selector_all("td")
+    name = tds[0].inner_text().strip() if tds else ""
+    date = _pygen_smart_find_date_in_row_pw(tds)  # Playwright 模式
+    download_url = ...
+    reports.append({"name": name, "date": date, "downloadUrl": download_url, "fileType": "pdf"})
 ```
 
 ### 方案C（兜底，有限成本）：小批量详情页补全日期
@@ -1396,48 +1386,40 @@ def main():
 - ❌ `date_elem = tds[4].select_one('span')` —— 不同网站日期可能在第3、4、5列或其他位置
 - ❌ `date_text = tds[3].get_text()` —— 假设日期固定在某列是不可靠的
 
-**必须使用智能扫描策略**（PyGen 会注入 `_pygen_smart_find_date_in_row_bs4` 和 `_pygen_smart_find_date_in_row_pw` 工具函数）：
+**必须使用智能扫描策略**（PyGen 会注入 `_pygen_smart_find_date_in_row_pw` 等工具函数；解析 HTML 时统一使用 Playwright，故仅提供 Playwright 用法）：
 
 ### 策略1：使用注入的日期提取工具（推荐）
 ```python
-# BeautifulSoup 模式
+# Playwright 解析表格时，按行取 td 后调用注入函数
+rows = page.locator("table tbody tr").all()
 for row in rows:
-    tds = row.select('td')
-    # 使用注入的智能日期扫描函数（扫描整行所有列）
-    date = _pygen_smart_find_date_in_row_bs4(tds)
-    
-# Playwright 模式
-for row in rows:
-    tds = row.query_selector_all('td')
+    tds = row.query_selector_all("td")
     date = _pygen_smart_find_date_in_row_pw(tds)
+    # ... 同循环内提取 name, download_url 等
 ```
 
-### 策略2：手动实现智能扫描（如不使用注入工具）
+### 策略2：手动实现智能扫描（Playwright，如不使用注入工具）
 ```python
-def find_date_in_row(tds) -> str:
-    \"\"\"智能扫描表格行中所有单元格查找日期\"\"\"
-    import re
+import re
+def find_date_in_row_pw(tds) -> str:
     date_re = re.compile(r'(\\d{4}[-/\\.]\\d{1,2}[-/\\.]\\d{1,2}|\\d{4}年\\d{1,2}月\\d{1,2}日)')
     for td in tds:
-        # 尝试 span、time 等容器
-        for tag in ['span', 'time']:
-            elem = td.select_one(tag)
+        for tag in ["span", "time"]:
+            elem = td.query_selector(tag)
             if elem:
-                match = date_re.search(elem.get_text(strip=True))
+                match = date_re.search(elem.inner_text().strip())
                 if match:
-                    return match.group(1).replace('/', '-').replace('.', '-')
-        # 直接获取 td 文本
-        match = date_re.search(td.get_text(strip=True))
+                    return match.group(1).replace("/", "-").replace(".", "-")
+        match = date_re.search(td.inner_text().strip())
         if match:
-            return match.group(1).replace('/', '-').replace('.', '-')
+            return match.group(1).replace("/", "-").replace(".", "-")
     return ""
 ```
 
 ### 其他可用的注入工具函数
 PyGen 会自动注入以下工具函数，你可以直接使用：
 - `_pygen_normalize_date(date_str)` - 标准化日期格式为 YYYY-MM-DD
-- `_pygen_smart_find_date_in_row_bs4(tds)` - BeautifulSoup 模式智能日期扫描
-- `_pygen_smart_find_date_in_row_pw(tds)` - Playwright 模式智能日期扫描  
+- `_pygen_smart_find_date_in_row_pw(tds)` - Playwright 模式智能日期扫描（表格行）
 - `_pygen_extract_date_from_api_item(item)` - 从 API 响应提取日期
 - `_pygen_merge_dates_by_association(reports, date_map)` - 通过关联合并日期
 - `_pygen_is_date_in_range(date_str, start_date, end_date)` - 检查日期范围
@@ -1572,12 +1554,39 @@ HEADERS = {...}
 # 分类配置（如果是SPA页面需要分类参数）
 CATEGORIES = {...}
 
-def fetch_data(page_num: int = 1, category_params: dict = None) -> dict:
-    \"\"\"获取数据\"\"\"
+def fetch_data(page_num: int = 1, category_params: dict = None) -> list:
+    \"\"\"获取一页数据\"\"\"
     ...
 
 def main():
     \"\"\"主函数\"\"\"
+    all_data = []
+    page = 1
+    
+    # 【必须】翻页循环：两个退出条件，缺一不可，否则会无限循环
+    while len(all_data) < MAX_ITEMS:
+        print(f"正在爬取第 {page} 页...")
+        new_data = fetch_data(page)  # API 时传 page；Playwright 时先 goto 再解析当前页
+        
+        # 退出条件②：当前页无数据 = 没有更多页，立即停止
+        if not new_data:
+            print("当前页无数据，停止翻页")
+            break
+            
+        all_data.extend(new_data)
+        print(f"当前已收集 {len(all_data)} 条，目标 {MAX_ITEMS} 条")
+        
+        # 退出条件①：已凑满目标数量
+        if len(all_data) >= MAX_ITEMS:
+            break
+            
+        # 翻页：API 用 page+1；Playwright 需定位“下一页”按钮/链接，若不存在则 break
+        # 示例(API): page += 1
+        # 示例(Playwright): next_btn = page.locator("a.page-numbers.next, a.next"); if not next_btn.is_visible(): break; next_btn.click(); page.wait_for_timeout(2000)
+        page += 1
+        time.sleep(2)
+
+    final_data = all_data[:MAX_ITEMS]  # 截取目标数量
     ...
 
 if __name__ == "__main__":
@@ -1629,11 +1638,10 @@ browser = p.chromium.launch(
 )
 ```
 
-### 新闻页面一般特点
-- 新闻列表页通常是服务端渲染或有 API 接口
-- 优先检查是否有 JSON API（如 /api/news, /api/articles）
-- 如果没有 API，使用 requests + BeautifulSoup 解析静态 HTML
-- 对于 SPA 页面，使用 Playwright
+### 新闻页面技术选型（与主流程双轨制一致）
+- **有 JSON API**（如 /api/news, /api/articles）：必须使用 `requests` 直接调用，不要启动浏览器。
+- **无 API、需从 HTML 提取**：必须使用 **Playwright** 解析页面。**禁止**使用 BeautifulSoup 或 lxml 解析 HTML（无论页面是否看似静态）。
+- 使用 Playwright 时可使用 `:has-text()`, `:visible`, XPath 等高级选择器。
 
 ### 需要爬取的新闻字段
 1. **title**（必须）：新闻标题
@@ -1643,6 +1651,7 @@ browser = p.chromium.launch(
 5. **sourceUrl**：原文链接
 6. **summary**：摘要（如果有）
 7. **content**：正文内容（完整保留，包含 HTML 标签或 Markdown 格式的图片链接）
+
 
 ## 【强制】内容清洗要求（修复图片加载问题）
 
@@ -1946,11 +1955,25 @@ if __name__ == "__main__":
 
 ## 任务要求
 
-1. 分析页面数据来源（API接口 or 静态HTML）
+1. 分析页面数据来源（API 接口 or HTML 页面；若为 HTML 必须使用 Playwright 解析）
 2. 生成能爬取该页面所有数据的Python脚本
-3. 如果有分页，必须处理分页逻辑
+3. 【无条件强制】必须实现翻页循环，且**严禁无限循环**
+   - 当 MAX_ITEMS > 1 时，必须用 `while len(collected) < MAX_ITEMS:` 的循环；循环内**必须同时满足以下两种退出条件之一**才停止，否则会无限翻页：
+     - **退出条件①**：已收集数量 ≥ MAX_ITEMS，则 `break`。
+     - **退出条件②**：没有更多页——当前页解析到的条目数为 0，或（若为 HTML）找不到“下一页”按钮/链接，或（若为 API）当前页返回空列表，则 `break`，不要继续请求下一页。
+   - **如何知道“第几页”**：若为 API，用请求参数 `page`/`pageNo` 等递增（如 `page=1,2,3...`）；若为 HTML，要么用 URL 中的 `?page=N` 或 `?paged=N` 递增，要么用 Playwright 点击“下一页”按钮（如 `a.page-numbers.next`、`a.next`），点击后无需自己维护页码，但**必须**在每次处理完当前页后检查“是否还有下一页”（例如按钮不可见或 `disabled` 则 break）。
+   - 严禁只写单页抓取的 for 循环；也严禁在“无新数据/无下一页”时仍不 break 导致死循环。
 4. 提取每条记录的关键字段（标题、日期、链接等）
 5. 如果有下载链接（PDF等），提取下载URL
+   - 【重要】混合内容处理：某些列表项的链接可能直接指向 PDF/DOC 文件（而不是 HTML 详情页）。
+   - 在进入详情页之前，必须检查链接 URL 的后缀（如 .pdf, .doc, .docx, .xls, .xlsx）。
+   - **如果是文件链接**：不要调用 page.goto()！直接将该 URL 保存为 content/downloadUrl，跳过正文提取。
+   - **如果是 HTML 链接**：正常导航并提取正文。如果正文区域很空但有 PDF 下载链接，回退为保存 PDF 链接。
+   - 【Playwright 错误处理】：在访问详情页时，`page.goto(url)` 必须包裹在 `try-except` 块中。
+     - 如果捕获到 `Download is starting` 或 `net::ERR_ABORTED` 错误，说明该 URL 触发了下载（是文件而非网页）。
+     - 此时应在 `except` 块中捕获异常，并将该 URL 直接作为 content 保存（**绝对不要**添加 "File Download or Error:" 等任何前缀！）。
+     - 如果需要保存为 HTML 格式，请使用 `<a href="{{url}}" target="_blank">{{url}}</a>`（注意添加 target="_blank" 以便在新标签页打开）。
+     - **不要抛出错误**，也不要保存错误信息文本。
 6. 【重要】如果检测到分类参数，必须：
    - 定义分类配置字典
    - 遍历所有分类获取完整数据
@@ -1974,7 +1997,7 @@ if __name__ == "__main__":
         api_requests = network_requests.get("api_requests", [])
 
         if not api_requests:
-            lines.append("未捕获到明显的API请求，页面可能是服务端渲染的静态HTML。\n")
+            lines.append("未捕获到明显的API请求，页面需使用 Playwright 解析 HTML。\n")
         else:
             lines.append("### 初始页面加载时的API请求\n")
             for i, req in enumerate(api_requests[:10], 1):
@@ -2158,7 +2181,10 @@ if __name__ == "__main__":
         if lists:
             lines.append(f"\n### 列表 ({len(lists)} 个)")
             for l in lists[:5]:
-                lines.append(f"- 选择器: `{l.get('selector')}`, 项数: {l.get('itemCount')}")
+                count = l.get('itemCount', 0)
+                lines.append(f"- 选择器: `{l.get('selector')}`, 项数: {count}")
+                if count < 5:
+                    lines.append(f"  ⚠️ **注意**：当前页面检测到的列表项较少 ({count}项)。如果用户目标是爬取更多数据(如 Top 5/10)，**必须**编写翻页循环逻辑！")
 
         # 链接信息
         links = structure.get("links", {})
@@ -2297,7 +2323,14 @@ if __name__ == "__main__":
                     tl = c.get("textLength", 0)
                     ld = c.get("linkDensity", 0)
                     preview = (c.get("textPreview") or "")[:60]
-                    lines.append(f"  {i}. selector=`{sel}` | 正文长度={tl} | 链接密度={ld} | 预览={preview!r}")
+                    is_file = c.get("isFileContainer", False)
+                    file_ext = c.get("fileExt", "")
+                    
+                    extra_info = ""
+                    if is_file:
+                        extra_info = f" | 📄文件下载区域({file_ext}) [正文可能是此文件]"
+                        
+                    lines.append(f"  {i}. selector=`{sel}` | 正文长度={tl} | 链接密度={ld}{extra_info} | 预览={preview!r}")
             else:
                 lines.append("未探测到正文容器候选，请根据页面结构自行选择正文区域。")
         

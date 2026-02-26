@@ -72,36 +72,53 @@ def add_history(task_id, task_type, config_data, owner="admin"):
     conn.close()
 
 def update_history_status(task_id, status, result=None, logs=None, end_at=None, record_count=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    updates = []
-    params = []
-    
-    updates.append("status = ?")
-    params.append(status)
-    
-    if result is not None:
-        updates.append("result = ?")
-        params.append(json.dumps(result, ensure_ascii=False))
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        updates = []
+        params = []
         
-    if logs is not None:
-        updates.append("logs = ?")
-        params.append(json.dumps(logs, ensure_ascii=False))
-    
-    if end_at is not None:
-        updates.append("end_at = ?")
-        params.append(end_at)
+        updates.append("status = ?")
+        params.append(status)
         
-    if record_count is not None:
-        updates.append("record_count = ?")
-        params.append(record_count)
+        if result is not None:
+            updates.append("result = ?")
+            try:
+                params.append(json.dumps(result, ensure_ascii=False))
+            except TypeError as e:
+                print(f"[DB ERROR] Result serialization failed for task {task_id}: {e}")
+                # Fallback: save basic info
+                params.append(json.dumps({"error": f"Serialization failed: {str(e)}"}, ensure_ascii=False))
+            except Exception as e:
+                print(f"[DB ERROR] Result processing failed: {e}")
+                params.append("{}")
+            
+        if logs is not None:
+            updates.append("logs = ?")
+            try:
+                params.append(json.dumps(logs, ensure_ascii=False))
+            except Exception as e:
+                print(f"[DB ERROR] Logs serialization failed: {e}")
+                params.append("[]")
         
-    params.append(task_id)
-    
-    sql = f"UPDATE history SET {', '.join(updates)} WHERE id = ?"
-    c.execute(sql, params)
-    conn.commit()
-    conn.close()
+        if end_at is not None:
+            updates.append("end_at = ?")
+            params.append(end_at)
+            
+        if record_count is not None:
+            updates.append("record_count = ?")
+            params.append(record_count)
+            
+        params.append(task_id)
+        
+        sql = f"UPDATE history SET {', '.join(updates)} WHERE id = ?"
+        c.execute(sql, params)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        import traceback
+        print(f"[DB CRITICAL] Failed to update history for task {task_id}: {e}")
+        traceback.print_exc()
 
 def get_all_history():
     conn = sqlite3.connect(DB_PATH)
@@ -158,3 +175,43 @@ def delete_history(task_id):
     conn.commit()
     conn.close()
     return deleted
+
+def reset_running_tasks():
+    """重启时将所有 'running' 状态的任务重置为 'failed'"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        # 查找所有 running 状态的任务
+        c.execute("SELECT id, result FROM history WHERE status = 'running'")
+        rows = c.fetchall()
+        
+        if not rows:
+            conn.close()
+            return
+
+        print(f"发现 {len(rows)} 个异常中断的任务，正在重置状态...")
+        
+        for row in rows:
+            task_id = row['id']
+            result_json = row['result']
+            try:
+                result = json.loads(result_json) if result_json else {}
+            except:
+                result = {}
+            
+            result['error'] = "服务异常重启，任务被中断"
+            
+            c.execute(
+                "UPDATE history SET status = 'failed', end_at = ?, result = ? WHERE id = ?", 
+                (datetime.now(), json.dumps(result, ensure_ascii=False), task_id)
+            )
+            
+        conn.commit()
+        conn.close()
+        print(f"已重置 {len(rows)} 个任务为 failed")
+            
+    except Exception as e:
+        print(f"重置任务状态失败: {e}")
+

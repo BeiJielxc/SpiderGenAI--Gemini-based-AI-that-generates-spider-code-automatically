@@ -34,6 +34,7 @@ from database import (
     get_all_history,
     get_history_detail,
     delete_history as delete_history_record,
+    reset_running_tasks,
 )
 
 # ============ Pydantic Models ============
@@ -169,6 +170,7 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     try:
         await asyncio.to_thread(init_db)
+        await asyncio.to_thread(reset_running_tasks)
         print("✓ 数据库初始化成功")
     except Exception as e:
         print(f"✗ 数据库初始化失败: {e}")
@@ -821,7 +823,6 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             
             # 创建唯一的子文件夹：task_id + 时间戳
             import hashlib
-            from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             # 使用 URL 的哈希值作为标识（取前8位）
             url_hash = hashlib.md5(request.url.encode()).hexdigest()[:8]
@@ -1174,15 +1175,27 @@ async def rerun_task(task_id: str):
     
     复用原任务的请求参数，创建一个新任务加入队列
     """
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="原任务不存在")
+    req_data = None
     
-    original_task = tasks[task_id]
-    if "request" not in original_task:
-        raise HTTPException(status_code=400, detail="无法重试该任务（原始请求数据丢失）")
+    # 1. 尝试从活跃任务中获取
+    if task_id in tasks:
+        task = tasks[task_id]
+        if "request" in task:
+            req_data = task["request"]
+            
+    # 2. 如果未找到，尝试从历史记录获取
+    if not req_data:
+        try:
+            history_item = await asyncio.to_thread(get_history_detail, task_id)
+            if history_item and history_item.get("config"):
+                req_data = history_item["config"]
+        except Exception as e:
+            print(f"从历史记录获取任务配置失败: {e}")
+            
+    if not req_data:
+        raise HTTPException(status_code=404, detail="原任务不存在或已失效")
         
     try:
-        req_data = original_task["request"]
         # 重建请求对象
         request = GenerateRequest(**req_data)
         # 调用生成接口（复用逻辑）

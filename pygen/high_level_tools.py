@@ -74,12 +74,21 @@ def _score_candidate_block(
 
     has_link = 0
     has_date = 0
+    has_file = 0  # 新增：文件链接计数
     items: List[Dict[str, Any]] = []
+
+    # 文件扩展名列表（用于识别文件列表）
+    file_exts = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".zip", ".rar", ".7z"}
 
     for b in blocks[:30]:
         a = b.select_one("a[href]")
         if a:
             has_link += 1
+            # 检查是否为文件链接
+            href_lower = (a.get("href") or "").lower().strip()
+            if any(href_lower.endswith(ext) for ext in file_exts):
+                has_file += 1  # 这是一个文件列表项
+        
         all_text = b.get_text(" ", strip=True)
         date_str = _normalize_date(all_text)
         if date_str:
@@ -109,8 +118,32 @@ def _score_candidate_block(
         score += 20
     score += min(has_link, 30) * 2
     score += min(has_date, 30) * 3
+    # 文件列表加分：如果包含文件链接，即使文本较短也认为是有效列表
+    score += min(has_file, 30) * 5
+
     if has_link > 0 and has_date > 0:
         score += 30
+
+    # 降权：侧栏/导航式列表（短链接文本、常见菜单词）避免误选
+    titles = [i.get("title") or "" for i in items[:15]]
+    short_count = sum(1 for t in titles if len(t.strip()) < 25)
+    nav_like_phrases = {
+        "find a licensee", "publications & reports", "online services",
+        "news", "notices", "press release", "reports", "warnings & alerts",
+        "home", "about us", "credit rating", "dealers license", "investment advisors",
+        "securities exchange", "enforcement actions", "registration", "careers",
+        "contact", "faq", "document search", "annual reports", "current openings",
+        "internships", "photo gallery", "events calendar", "multimedia", "events",
+    }
+    nav_like_count = sum(1 for t in titles if t.strip().lower() in nav_like_phrases)
+    if short_count >= 5 or nav_like_count >= 4:
+        score -= 50
+    # 加分：文章列表常含 "READ MORE" 或较长标题
+    if any("read more" in t.lower() for t in titles):
+        score += 45
+    avg_title_len = (sum(len(t.strip()) for t in titles if t.strip()) / max(len([t for t in titles if t.strip()]), 1))
+    if avg_title_len > 35:
+        score += 20
 
     first = blocks[0]
     sel_parts = []
@@ -195,7 +228,7 @@ def _score_candidate_block(
 def _discover_list_candidates(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
     """Find all potential repeating-block groups in the page."""
     skip_tags = {"script", "style", "noscript", "link", "meta", "head"}
-    skip_classes = {"header", "footer", "nav", "menu", "sidebar", "copyright"}
+    skip_classes = {"header", "footer", "nav", "menu", "sidebar", "copyright", "icon-list"}
 
     candidates: List[Dict[str, Any]] = []
 
@@ -220,8 +253,59 @@ def _discover_list_candidates(soup: BeautifulSoup, base_url: str) -> List[Dict[s
             if scored["score"] > 30:
                 candidates.append(scored)
 
+    # 补充发现：通过 "READ MORE" / "read more" 链接反推文章列表（Elementor 等卡片式列表）
+    read_more_blocks = _discover_list_via_read_more(soup, base_url)
+    for cand in read_more_blocks:
+        if cand["score"] > 30 and cand not in candidates:
+            candidates.append(cand)
+
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates[:5]
+
+
+def _discover_list_via_read_more(soup: BeautifulSoup, base_url: str) -> List[Dict[str, Any]]:
+    """Find list of article cards by locating 'READ MORE' / 'read more' links and grouping their containers."""
+    out: List[Dict[str, Any]] = []
+    read_more_links = soup.find_all(
+        "a",
+        href=True,
+        string=re.compile(r"^\s*read\s+more\s*$", re.I),
+    )
+    # 也匹配仅包含 "READ MORE" 的链接（可能被包裹在 span 里）
+    for a in soup.find_all("a", href=True):
+        t = _text_of(a).strip()
+        if t and re.match(r"^read\s+more\s*$", t, re.I):
+            read_more_links.append(a)
+    read_more_links = list({id(x): x for x in read_more_links}.values())
+    if len(read_more_links) < 3:
+        return out
+    # 每个链接向上找“卡片”容器：含标题（h1/h2/h3）且含该链接的最近祖先
+    cards: List[Tag] = []
+    for a in read_more_links:
+        node = a.parent
+        while node and node.name != "body":
+            if node.name in ("div", "article", "section", "li"):
+                h = node.find(["h1", "h2", "h3"])
+                if h and a in node.descendants:
+                    cards.append(node)
+                    break
+            node = node.parent if hasattr(node, "parent") else None
+    if len(cards) < 3:
+        return out
+    # 按 tag|class 分组，取数量最多的一组
+    key_to_nodes: Dict[str, List[Tag]] = {}
+    for c in cards:
+        k = c.name + "|" + ".".join(c.get("class", []))
+        key_to_nodes.setdefault(k, []).append(c)
+    best_key = max(key_to_nodes, key=lambda k: len(key_to_nodes[k]))
+    blocks = key_to_nodes[best_key]
+    if len(blocks) < 3:
+        return out
+    scored = _score_candidate_block(blocks, base_url)
+    # 来自 READ MORE 的列表给予额外加分，确保优先于侧栏
+    scored["score"] = scored["score"] + 40
+    out.append(scored)
+    return out
 
 
 def _discover_pagination(soup: BeautifulSoup, base_url: str) -> Dict[str, Any]:
@@ -1257,7 +1341,58 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
 
         try:
 
-            await detail_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            is_pdf_response = False
+            try:
+                response = await detail_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                # Handle "Download is starting" error which is thrown by Playwright when navigation is aborted due to download
+                if "Download is starting" in str(e) or "net::ERR_ABORTED" in str(e):
+                    response = None
+                    is_pdf_response = True
+                else:
+                    raise e
+            
+            # --- Check if response is a file (e.g. PDF) ---
+            content_type = ""
+            if not is_pdf_response:
+                try:
+                    if response:
+                        headers = response.headers
+                        content_type = (headers.get("content-type") or "").lower()
+                except Exception:
+                    pass
+
+                is_pdf_response = "application/pdf" in content_type or target_url.lower().split('?')[0].endswith(".pdf")
+            
+            if is_pdf_response:
+                summary = "Detail page is a PDF file (Content-Type: application/pdf)"
+                payload = {
+                    "url": target_url,
+                    "contentSelector": "",
+                    "contentTagName": "",
+                    "contentTextLength": 0,
+                    "sampleContentHtml": "",
+                    "contentCandidates": [{
+                        "selector": "body",
+                        "textLength": 0,
+                        "linkCount": 0,
+                        "linkDensity": 0,
+                        "textPreview": f"[PDF Document] {target_url}",
+                        "isFileContainer": True,
+                        "fileExt": "pdf"
+                    }],
+                    "titleSelector": "",
+                    "titleTagName": "",
+                    "titleText": "PDF Document",
+                    "structureHint": f"Direct PDF File: {target_url} (Do not parse HTML, download directly)",
+                    "isDirectFile": True,
+                    "fileType": "pdf"
+                }
+                ctx.log(f"[TOOL] probe_detail_page: {summary}")
+                # We can close the page early
+                await detail_page.close()
+                return ToolResult(success=True, data=payload, summary=summary, suggested_next_tools=["generate_crawler_code"])
+
             try:
                 await detail_page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
@@ -1283,6 +1418,9 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
 
             seen_selectors: set = set()
             content_candidates: List[Dict[str, Any]] = []
+
+            # 常见文件扩展名
+            FILE_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".zip", ".rar", ".7z"}
 
             for sel in _DETAIL_CONTENT_SELECTORS:
                 try:
@@ -1331,8 +1469,59 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                     "textPreview": (div.get_text(strip=True) or "")[:80].replace("\n", " "),
                 })
 
-            # 按“正文长度优先、链接密度低优先”排序，取前 10 个；推荐 = 第 1 个
-            content_candidates.sort(key=lambda c: (c["textLength"], -c["linkDensity"]), reverse=True)
+            # --- 兜底：搜索显著的文件下载链接 ---
+            # 如果正文区域很短或者未找到，尝试寻找是否直接提供了 PDF/表格下载
+            # 这种情况下，下载链接所在的容器可能就是“正文”
+            for a in soup.find_all("a", href=True):
+                href = (a.get("href") or "").strip().lower()
+                # 检查是否是文件链接
+                if any(href.endswith(ext) for ext in FILE_EXTS):
+                    # 找到一个文件链接，查看其容器
+                    container = a.parent
+                    if not container or container.name in ['body', 'html']:
+                        container = a
+                    
+                    # 排除导航/页脚等噪音区域
+                    cont_cls = " ".join(container.get("class", []) or []).lower()
+                    cont_id = str(container.get("id", "")).lower()
+                    if any(kw in (cont_cls + cont_id) for kw in ("nav", "footer", "header", "menu", "sidebar", "breadcrumb")):
+                        continue
+
+                    # 获取容器文本长度（文件下载容器通常文本较短，不能用 <50 过滤）
+                    text = container.get_text(strip=True)
+                    text_len = len(text)
+                    
+                    # 只有当容器不过大（避免选中整个列表页）时才采纳
+                    if text_len < 2000:
+                        selector = _selector_for_el(container)
+                        if selector in seen_selectors:
+                            continue
+                        seen_selectors.add(selector)
+                        
+                        # 标记为文件容器
+                        content_candidates.append({
+                            "selector": selector,
+                            "textLength": text_len, # 即使很短也没关系
+                            "linkCount": 1,
+                            "linkDensity": 0.0, # 忽略密度检查
+                            "textPreview": f"[FILE] {text[:80]}",
+                            "isFileContainer": True, # 特殊标记，排序时优先
+                            "fileExt": href.split('.')[-1]
+                        })
+
+            # 按“是否为文件容器优先、正文长度优先、链接密度低优先”排序
+            # isFileContainer=True 的给予极大加权，确保如果没找到长文，文件链接能排前面
+            # 但如果已经找到了很长的正文（textLength > 500），文件链接排在次席作为补充
+            def _candidate_score(c):
+                is_file = c.get("isFileContainer", False)
+                length = c["textLength"]
+                # 策略：如果找到了长文(>2000字)，优先长文；否则优先文件链接
+                # 这里的逻辑是：文件容器通常很短，如果按长度排会沉底。
+                # 所以我们给文件容器一个“虚拟基础分”，相当于 2000 字的权重。
+                base_score = 2000 if is_file else 0
+                return (length + base_score, -c["linkDensity"])
+
+            content_candidates.sort(key=_candidate_score, reverse=True)
             content_candidates = content_candidates[:10]
 
             recommended = content_candidates[0] if content_candidates else None
