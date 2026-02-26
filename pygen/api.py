@@ -435,7 +435,7 @@ async def _run_generation_task(task_id: str, request: GenerateRequest):
             start_date=request.startDate, end_date=request.endDate,
             extra_requirements=user_requirements, task_id=task_id,
             log_callback=lambda msg: _add_log(task_id, msg),
-            attachments=llm_attachments, max_iterations=20,
+            attachments=llm_attachments, max_iterations=config.agent_max_iterations if config else 20,
             cancel_check=lambda: _is_cancelled(task_id),
         )
 

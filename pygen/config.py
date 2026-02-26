@@ -179,6 +179,16 @@ class Config:
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
     
+    # ============ Agent 配置 ============
+    @property
+    def agent_max_iterations(self) -> int:
+        """Agent 模式最大迭代轮次"""
+        v = self.config.get('agent', {}).get('max_iterations', 20)
+        try:
+            return max(1, int(v))
+        except (TypeError, ValueError):
+            return 20
+
     # ============ 服务端（多人在线）配置 ============
 
     def _server_cfg(self) -> Dict[str, Any]:
