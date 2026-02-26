@@ -1967,13 +1967,21 @@ if __name__ == "__main__":
 5. 如果有下载链接（PDF等），提取下载URL
    - 【重要】混合内容处理：某些列表项的链接可能直接指向 PDF/DOC 文件（而不是 HTML 详情页）。
    - 在进入详情页之前，必须检查链接 URL 的后缀（如 .pdf, .doc, .docx, .xls, .xlsx）。
-   - **如果是文件链接**：不要调用 page.goto()！直接将该 URL 保存为 content/downloadUrl，跳过正文提取。
+   - **如果是文件链接**：不要调用 page.goto()！直接保存为 HTML 链接 <a href="{{url}}" target="_blank">{{url}}</a>，跳过正文提取。
    - **如果是 HTML 链接**：正常导航并提取正文。如果正文区域很空但有 PDF 下载链接，回退为保存 PDF 链接。
-   - 【Playwright 错误处理】：在访问详情页时，`page.goto(url)` 必须包裹在 `try-except` 块中。
-     - 如果捕获到 `Download is starting` 或 `net::ERR_ABORTED` 错误，说明该 URL 触发了下载（是文件而非网页）。
-     - 此时应在 `except` 块中捕获异常，并将该 URL 直接作为 content 保存（**绝对不要**添加 "File Download or Error:" 等任何前缀！）。
-     - 如果需要保存为 HTML 格式，请使用 `<a href="{{url}}" target="_blank">{{url}}</a>`（注意添加 target="_blank" 以便在新标签页打开）。
-     - **不要抛出错误**，也不要保存错误信息文本。
+   - 【Playwright 错误处理】：必须严格使用以下 try-except 代码结构来处理详情页跳转：
+     ```python
+     try:
+         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+         # ... 提取正文的代码 ...
+     except Exception as e:
+         # 捕获下载中断错误（说明是文件链接）
+         if "Download is starting" in str(e) or "net::ERR_ABORTED" in str(e):
+             # 直接保存 URL 链接，不要添加其他文字
+             article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
+         else:
+             print(f"Detail page failed: {{e}}")
+     ```
 6. 【重要】如果检测到分类参数，必须：
    - 定义分类配置字典
    - 遍历所有分类获取完整数据
