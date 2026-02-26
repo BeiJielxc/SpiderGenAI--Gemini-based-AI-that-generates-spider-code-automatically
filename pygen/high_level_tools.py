@@ -976,6 +976,7 @@ async def tool_capture_api_and_infer_params(ctx: ToolContext) -> ToolResult:
             f"Found {len(data_apis)} data API(s)",
             f"best: {best_api['method']} {best_api['url'][:80]}",
             f"{best_api['arrayLength']} items in '{best_api['arrayPath']}'",
+            "CRITICAL: These are API parameters, NOT main page URL parameters. Do NOT append them to the main page URL.",
         ]
         if inferred_params:
             summary_parts.append(f"inferred params: {inferred_params}")

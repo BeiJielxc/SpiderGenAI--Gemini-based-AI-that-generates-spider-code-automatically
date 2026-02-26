@@ -94,6 +94,8 @@ Explore the website, collect enough evidence, then generate a robust crawler scr
 - `run_python_snippet` can be used for exploration when the high-level tools don't cover your needs, but do NOT reference `ctx` or use `[HTML_CONTENT_PLACEHOLDER]` inside snippets.
 
 ### CRITICAL RULES
+- **Pagination Strategy**: Always PRIORITIZE clicking the "Next" button (selector clicking) over URL manipulation. Only use URL construction if no "Next" button is found or if API scraping is required.
+- **URL Parameter Verification**: Before using URL parameters for pagination (e.g. adding `?page=2`), you MUST use `turn_page_and_verify_change` to test if the parameter works. If modifying the URL directly results in no content change or error, fallback to clicking the "Next" button strategy immediately.
 - `extract_list_and_pagination` gives you the LIST page structure. `probe_detail_page` gives you the DETAIL page structure. Together they provide all CSS selectors needed for `generate_crawler_code`.
 - After `extract_list_and_pagination` succeeds, your NEXT action should be `probe_detail_page` (to learn the detail page DOM), then `generate_crawler_code`.
 - Do NOT manually guess detail-page selectors. Always run `probe_detail_page` first.
