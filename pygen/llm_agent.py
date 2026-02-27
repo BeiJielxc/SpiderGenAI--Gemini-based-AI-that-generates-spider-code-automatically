@@ -1966,22 +1966,27 @@ if __name__ == "__main__":
 4. 提取每条记录的关键字段（标题、日期、链接等）
 5. 如果有下载链接（PDF等），提取下载URL
    - 【重要】混合内容处理：某些列表项的链接可能直接指向 PDF/DOC 文件（而不是 HTML 详情页）。
-   - 在进入详情页之前，必须检查链接 URL 的后缀（如 .pdf, .doc, .docx, .xls, .xlsx）。
-   - **如果是文件链接**：不要调用 page.goto()！直接保存为 HTML 链接 <a href="{{url}}" target="_blank">{{url}}</a>，跳过正文提取。
-   - **如果是 HTML 链接**：正常导航并提取正文。如果正文区域很空但有 PDF 下载链接，回退为保存 PDF 链接。
-   - 【Playwright 错误处理】：必须严格使用以下 try-except 代码结构来处理详情页跳转：
+   - **文件检测不能仅看 URL 后缀**：有些网站的 PDF 链接路径中不含 .pdf 后缀（如 `/detail-pages/publication/xxx`），必须通过运行时行为判断。
+   - 先检查 URL 后缀（.pdf, .doc, .docx, .xls, .xlsx）：如果匹配，直接保存链接，跳过 page.goto()。
+   - **如果 URL 无文件后缀**：正常导航并提取正文，但**必须处理以下所有失败情况**。
+   - 【强制】详情页内容提取的 try-except 代码结构：
      ```python
      try:
          page.goto(url, wait_until="domcontentloaded", timeout=30000)
-         # ... 提取正文的代码 ...
-     except Exception as e:
-         # 捕获下载中断错误（说明是文件链接）
-         if "Download is starting" in str(e) or "net::ERR_ABORTED" in str(e):
-             # 直接保存 URL 链接，不要添加其他文字
+         content_html = ""
+         # ... 尝试用选择器提取正文 ...
+         if not content_html or len(content_html.strip()) < 50:
+             # 正文为空或极短 → 视为文件/不可解析页面 → 回退为 URL 链接
              article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
          else:
-             print(f"Detail page failed: {{e}}")
+             article_data["content"] = clean_html_content(content_html, url)
+     except Exception as e:
+         # 捕获下载中断/页面加载错误 → 一律回退为 URL 链接
+         article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
      ```
+   - 【严禁】在 content 字段中添加任何额外文字，如 "抓取失败"、"Failed to load"、"Download Document"、"请访问原文" 等。
+   - 【严禁】生成不含 target="_blank" 的链接。所有 <a> 标签必须包含 `target="_blank"`。
+   - content 字段要么是提取到的完整 HTML 正文，要么是纯链接 `<a href="{{url}}" target="_blank">{{url}}</a>`，没有第三种格式。
 6. 【重要】如果检测到分类参数，必须：
    - 定义分类配置字典
    - 遍历所有分类获取完整数据
@@ -2319,6 +2324,24 @@ if __name__ == "__main__":
         # 详情页正文容器（probe_detail_page 结果）：只提供候选，由大模型自己选
         detail_probe = enhanced_analysis.get("detail_probe", {})
         if detail_probe and isinstance(detail_probe, dict):
+            # 检测直接文件（PDF等）详情页 —— 这类页面没有 HTML 正文
+            if detail_probe.get("isDirectFile"):
+                file_type = detail_probe.get("fileType", "file").upper()
+                file_url = detail_probe.get("url", "")
+                lines.append(f"\n### 【关键】详情页是 {file_type} 文件，非 HTML 页面")
+                lines.append(
+                    f"probe_detail_page 检测到详情页返回的是 **{file_type} 文件**（Content-Type 检测）。\n"
+                    f"示例 URL: {file_url[:120]}\n\n"
+                    "**注意**：这类链接的 URL 路径可能**不包含文件后缀**（如 .pdf），不能仅靠 URL 后缀判断。\n"
+                    "**强制要求**：\n"
+                    "1. 在访问每个详情页时，必须用 try-except 包裹 `page.goto()`。\n"
+                    "2. 如果捕获到 'Download is starting' 或 'net::ERR_ABORTED' 异常，说明是文件链接。\n"
+                    "3. 如果页面加载成功但正文容器为空或不存在，也应视为文件/不可解析页面。\n"
+                    "4. 以上所有情况，content 字段**必须**只放一个干净的 HTML 链接，格式固定为：\n"
+                    '   `<a href="{url}" target="_blank">{url}</a>`\n'
+                    "5. **严禁**在 content 中添加任何额外文字（如\"抓取失败\"、\"Failed to load\"、\"Download Document\"等）。\n"
+                )
+
             candidates = detail_probe.get("contentCandidates") or []
             lines.append("\n### 【详情页正文容器】请从下列候选中自行选择")
             if candidates:

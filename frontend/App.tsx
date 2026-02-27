@@ -218,6 +218,8 @@ const App: React.FC = () => {
     }
 
     setIsSubmitting(true);
+    setTaskId('');
+    setSelectedPaths([]);
     setIsFromBatchExecution(false);
     setBatchExecutionPrefill(null);
     setExecutionBackTarget('form');
@@ -367,6 +369,10 @@ const App: React.FC = () => {
 
   const handleRerunFromHistory = (config: CrawlerFormData) => {
     setFormData(normalizeFormData(config));
+    setTaskId('');
+    setSelectedPaths([]);
+    setIsFromBatchExecution(false);
+    setBatchExecutionPrefill(null);
     setView('form');
   };
 

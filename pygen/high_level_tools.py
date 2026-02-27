@@ -67,6 +67,7 @@ def _html_sig(html: str) -> str:
 def _score_candidate_block(
     blocks: List[Tag],
     base_url: str,
+    parent_tag: Optional[Tag] = None,
 ) -> Dict[str, Any]:
     """Score a group of sibling blocks on how 'list-like' they are."""
     if not blocks:
@@ -146,16 +147,33 @@ def _score_candidate_block(
         score += 20
 
     first = blocks[0]
-    sel_parts = []
+
+    # --- Build child selector ---
+    child_sel = ""
     if first.get("class"):
-        sel_parts.append(f".{'.'.join(first['class'])}")
+        child_sel = f".{'.'.join(first['class'])}"
     elif first.name:
-        parent = first.parent
-        if parent and parent.get("class"):
-            sel_parts.append(f".{'.'.join(parent['class'])} > {first.name}")
+        child_sel = first.name
+
+    # --- Build parent-qualified selector for disambiguation ---
+    p = parent_tag if parent_tag is not None else first.parent
+    parent_sel = ""
+    if p and hasattr(p, "name") and p.name not in (None, "body", "[document]"):
+        if p.get("id"):
+            parent_sel = f"#{p['id']}"
+        elif p.get("class"):
+            parent_sel = f"{p.name}.{'.'.join(p['class'])}"
         else:
-            sel_parts.append(first.name)
-    selector = "".join(sel_parts) or first.name or "div"
+            gp = getattr(p, "parent", None)
+            if gp and hasattr(gp, "name") and gp.name not in (None, "body", "[document]") and gp.get("class"):
+                parent_sel = f".{'.'.join(gp['class'])} {p.name}"
+
+    if parent_sel and child_sel:
+        selector = f"{parent_sel} > {child_sel}"
+    else:
+        selector = child_sel or first.name or "div"
+
+    bare_selector = child_sel or first.name or "div"
 
     date_selector = ""
     title_selector = "a"
@@ -185,6 +203,12 @@ def _score_candidate_block(
     cls = ".".join(first.get("class", []))
     tag_desc = f"<{tag_name} class='{cls}'>" if cls else f"<{tag_name}>"
 
+    # Parent container description for structureHint
+    parent_container_desc = ""
+    if p and hasattr(p, "name") and p.name not in (None, "body", "[document]"):
+        p_cls = ".".join(p.get("class", []))
+        parent_container_desc = f"<{p.name} class='{p_cls}'>" if p_cls else f"<{p.name}>"
+
     title_tag_desc = ""
     if a_el:
         a_cls = ".".join(a_el.get("class", []))
@@ -204,7 +228,10 @@ def _score_candidate_block(
             d_cls = ".".join(d_el.get("class", []))
             date_tag_desc = f"<{d_el.name} class='{d_cls}'>" if d_cls else f"<{d_el.name}>"
 
-    hint_parts = [f"Each item is a {tag_desc}"]
+    hint_parts = []
+    if parent_container_desc:
+        hint_parts.append(f"parent container: {parent_container_desc}")
+    hint_parts.append(f"Each item is a {tag_desc}")
     if title_tag_desc:
         hint_parts.append(f"title/link in {title_tag_desc}")
     if date_tag_desc:
@@ -215,6 +242,7 @@ def _score_candidate_block(
         "score": score,
         "count": n,
         "selector": selector,
+        "bareSelector": bare_selector,
         "titleSelector": title_selector,
         "dateSelector": date_selector,
         "hasLink": has_link,
@@ -249,7 +277,7 @@ def _discover_list_candidates(soup: BeautifulSoup, base_url: str) -> List[Dict[s
         for key, blocks in child_tags.items():
             if len(blocks) < 3:
                 continue
-            scored = _score_candidate_block(blocks, base_url)
+            scored = _score_candidate_block(blocks, base_url, parent_tag=parent)
             if scored["score"] > 30:
                 candidates.append(scored)
 
@@ -301,7 +329,8 @@ def _discover_list_via_read_more(soup: BeautifulSoup, base_url: str) -> List[Dic
     blocks = key_to_nodes[best_key]
     if len(blocks) < 3:
         return out
-    scored = _score_candidate_block(blocks, base_url)
+    common_parent = blocks[0].parent if blocks[0].parent else None
+    scored = _score_candidate_block(blocks, base_url, parent_tag=common_parent)
     # 来自 READ MORE 的列表给予额外加分，确保优先于侧栏
     scored["score"] = scored["score"] + 40
     out.append(scored)
@@ -701,6 +730,80 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
             )
 
         best = candidates[0]
+
+        # --- Fix 4 & 5: Browser-based selector validation & visibility filtering ---
+        if ctx.browser.page:
+            try:
+                qualified_sel = best["selector"]
+                bare_sel = best.get("bareSelector", qualified_sel)
+                js_validate = """
+                (args) => {
+                    const { qualifiedSel, bareSel } = args;
+                    const qEls = document.querySelectorAll(qualifiedSel);
+                    const bEls = document.querySelectorAll(bareSel);
+                    let visibleQ = 0;
+                    qEls.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if (style.visibility !== 'hidden' && style.display !== 'none' && rect.height > 0) {
+                            visibleQ++;
+                        }
+                    });
+                    let visibleB = 0;
+                    bEls.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if (style.visibility !== 'hidden' && style.display !== 'none' && rect.height > 0) {
+                            visibleB++;
+                        }
+                    });
+                    return {
+                        qualifiedTotal: qEls.length,
+                        bareTotal: bEls.length,
+                        visibleQualified: visibleQ,
+                        visibleBare: visibleB
+                    };
+                }
+                """
+                counts = await ctx.browser.page.evaluate(
+                    js_validate,
+                    {"qualifiedSel": qualified_sel, "bareSel": bare_sel},
+                )
+
+                if counts:
+                    q_total = counts.get("qualifiedTotal", 0)
+                    b_total = counts.get("bareTotal", 0)
+                    v_q = counts.get("visibleQualified", 0)
+                    v_b = counts.get("visibleBare", 0)
+
+                    ctx.log(
+                        f"[TOOL] Selector validation: "
+                        f"qualified='{qualified_sel}' ({q_total} total, {v_q} visible), "
+                        f"bare='{bare_sel}' ({b_total} total, {v_b} visible)"
+                    )
+
+                    if b_total > q_total:
+                        ctx.log(
+                            f"[TOOL] Parent-qualified selector disambiguated: "
+                            f"bare matched {b_total}, qualified matched {q_total}"
+                        )
+
+                    if q_total > v_q and v_q > 0:
+                        best["selectorNote"] = (
+                            f"WARNING: selector '{qualified_sel}' matches {q_total} elements "
+                            f"but only {v_q} are visible. Use this selector to target visible items only."
+                        )
+
+                    if q_total == 0 and v_b > 0:
+                        ctx.log(
+                            f"[TOOL] Qualified selector matched 0 elements, "
+                            f"falling back to bare selector '{bare_sel}'"
+                        )
+                        best["selector"] = bare_sel
+
+            except Exception as e:
+                ctx.log(f"[TOOL] Selector validation skipped: {e}")
+
         items = best.get("items", [])
 
         parsed_dates = [it["date"] for it in items if it.get("date")]
@@ -721,17 +824,22 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
             "suggestStopPaging": bool(has_in_range and has_older),
         }
 
+        best_candidate_info = {
+            "selector": best["selector"],
+            "bareSelector": best.get("bareSelector", best["selector"]),
+            "titleSelector": best["titleSelector"],
+            "dateSelector": best["dateSelector"],
+            "score": best["score"],
+            "itemCount": best["count"],
+            "hasLink": best["hasLink"],
+            "hasDate": best["hasDate"],
+        }
+        if best.get("selectorNote"):
+            best_candidate_info["selectorNote"] = best["selectorNote"]
+
         payload = {
             "baseUrl": base_url,
-            "bestCandidate": {
-                "selector": best["selector"],
-                "titleSelector": best["titleSelector"],
-                "dateSelector": best["dateSelector"],
-                "score": best["score"],
-                "itemCount": best["count"],
-                "hasLink": best["hasLink"],
-                "hasDate": best["hasDate"],
-            },
+            "bestCandidate": best_candidate_info,
             "structureHint": best.get("structureHint", ""),
             "sampleHtml": best.get("sampleHtml", ""),
             "items": items,
