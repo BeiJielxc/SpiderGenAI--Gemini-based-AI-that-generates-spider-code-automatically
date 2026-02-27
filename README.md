@@ -246,27 +246,40 @@ npm run dev
 - **说明**：填写 URL、日期范围、运行模式等基础配置。
 - **Note**: Fill in URL, date range, run mode, etc.
 
-#### 2) 企业/新闻报告下载 - 执行监控 (Enterprise report - execution)
+#### 2) 自动识别网页目录树并选择 (Tree selection)
+
+![目录树选择 - 多板块手动选择 / Tree selection - manual multi-category selection](pic/tree.gif)
+
+- **说明**：多板块爬取（手动）时，用户可以选择手动选取需要爬取的板块。
+- **Note**: Select category paths when using manual multi-category crawling.
+
+#### 3) 企业报告下载 - 执行监控 (Enterprise report - execution)
 
 ![企业报告下载 - 执行监控 / Enterprise report - execution monitor](pic/pdfdownload.gif)
 
 - **说明**：查看任务日志、进度与报告结果列表；可下载生成脚本/查看文件。
 - **Note**: Monitor logs/progress and inspect report results; download the generated script/files.
 
-#### 3) 新闻舆情爬取 - 执行监控 (News sentiment - execution)
+#### 4) 新闻舆情爬取 - 执行监控 (News sentiment - execution)
 
 ![新闻舆情爬取 - 执行监控 / News sentiment - execution monitor](pic/newsdownload.gif)
 
 - **说明**：查看任务日志、进度与文章列表/详情；多板块时可标记来源板块。
 - **Note**: Monitor logs/progress and inspect article list/details; categories are labeled in multi-category mode.
 
-#### 4) 批量爬取界面 (Batch Crawling Interface)
+#### 5) 批量爬取界面 (Batch Crawling Interface)
 
 ![批量爬取界面 - 配置与监控 / Batch Crawl Interface - Config & Monitor](pic/PLPAGE.gif)
 
 - **说明**：支持手动配置批量任务，实时监控队列状态、查看任务日志与结果（成功/失败/重试）。
 - **Note**: Configure batch tasks, monitor queue status, logs, and results (success/failure/retry).
 
+#### 6) 历史记录界面 (Batch Crawling Interface)
+
+![历史记录界面 / history view Interface](pic/history.gif)
+
+- **说明**：历史记录界面可以支持查看跑过的历史记录日志，并且提供导出每个任务的配置信息（csv格式）和下载脚本以及任务的重新运行操作，并且都支持批量处理。也支持对不想要的历史记录的删除以及批量删除操作。
+- **Note**: The history interface allows users to view past task logs and provides options to export configuration information for each task (CSV format), download scripts, and rerun tasks, all with batch processing support. It also supports deleting unwanted history entries and performing batch deletion.
 ---
 
 <a id="outputs"></a>
