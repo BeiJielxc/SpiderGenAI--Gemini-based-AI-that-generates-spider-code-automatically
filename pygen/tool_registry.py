@@ -40,6 +40,7 @@ try:
         tool_capture_api_and_infer_params,
         tool_turn_page_and_verify_change,
         tool_probe_detail_page,
+        tool_verify_selector,
     )
 except ImportError:
     from .tools import (  # type: ignore
@@ -71,6 +72,7 @@ except ImportError:
         tool_capture_api_and_infer_params,
         tool_turn_page_and_verify_change,
         tool_probe_detail_page,
+        tool_verify_selector,
     )
 
 
@@ -288,7 +290,8 @@ def create_default_tool_registry() -> ToolRegistry:
         "wait_for_network_idle": ["get_network_requests", "analyze_page"],
         "get_intercepted_apis": ["get_network_requests", "capture_api_and_infer_params"],
         "detect_data_status": ["extract_list_and_pagination", "enhanced_page_analysis"],
-        "extract_list_and_pagination": ["capture_api_and_infer_params", "analyze_page"],
+        "extract_list_and_pagination": ["verify_selector", "capture_api_and_infer_params", "analyze_page"],
+        "verify_selector": ["generate_crawler_code", "verify_selector"],
         "capture_api_and_infer_params": ["extract_list_and_pagination", "analyze_page"],
         "turn_page_and_verify_change": ["extract_list_and_pagination", "generate_crawler_code"],
         "probe_detail_page": ["generate_crawler_code", "extract_list_and_pagination"],
@@ -459,6 +462,31 @@ def create_default_tool_registry() -> ToolRegistry:
         ),
         tool_probe_detail_page,
         tags={"high_level", "detail"},
+    )
+    registry.register_tool(
+        ToolSpec(
+            name="verify_selector",
+            description=(
+                "Test a CSS selector against the CURRENT live page using Playwright. "
+                "Returns totalMatches, visibleMatches, and element previews (tag, classes, text, href). "
+                "Use this to verify which candidate selector from extract_list_and_pagination actually "
+                "works on the live page before passing it to generate_crawler_code. "
+                "Read-only – does NOT change page state. Can be called multiple times."
+            ),
+            parameters={
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector to test on the current page.",
+                },
+                "description": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional label for this selector (e.g. 'parent-qualified', 'ancestor-qualified').",
+                },
+            },
+        ),
+        tool_verify_selector,
+        tags={"high_level", "inspect", "selector"},
     )
     registry.register_tool(
         ToolSpec(

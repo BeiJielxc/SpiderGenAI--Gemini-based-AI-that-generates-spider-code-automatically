@@ -94,11 +94,13 @@ Explore the website, collect enough evidence, then generate a robust crawler scr
 - `run_python_snippet` can be used for exploration when the high-level tools don't cover your needs, but do NOT reference `ctx` or use `[HTML_CONTENT_PLACEHOLDER]` inside snippets.
 
 ### CRITICAL RULES
+- **Technology Selection for generate_crawler_code strategy**: When the website has NO data API (i.e. `capture_api_and_infer_params` failed or was not used), you MUST specify "Use Playwright" in the strategy. Do NOT specify "Use requests + BeautifulSoup" for HTML-rendered pages — the system prompt forbids it. Only specify "Use requests" when a JSON API endpoint was successfully discovered.
 - **Pagination Strategy**: Always PRIORITIZE clicking the "Next" button (selector clicking) over URL manipulation. Only use URL construction if no "Next" button is found or if API scraping is required.
 - **URL Parameter Verification**: Before using URL parameters for pagination (e.g. adding `?page=2`), you MUST use `turn_page_and_verify_change` to test if the parameter works. If modifying the URL directly results in no content change or error, fallback to clicking the "Next" button strategy immediately.
 - `extract_list_and_pagination` gives you the LIST page structure. `probe_detail_page` gives you the DETAIL page structure. Together they provide all CSS selectors needed for `generate_crawler_code`.
 - After `extract_list_and_pagination` succeeds, your NEXT action should be `probe_detail_page` (to learn the detail page DOM), then `generate_crawler_code`.
-- Do NOT manually guess detail-page selectors. Always run `probe_detail_page` first.
+- **Detail page selectors**: Do NOT manually guess detail-page selectors. Always run `probe_detail_page` first. When passing info to `generate_crawler_code`, use the EXACT selector from `probe_detail_page` results (e.g. `div.group.margin-large`), not made-up selectors.
+- **List selector verification**: `extract_list_and_pagination` now returns `candidateSelectors` — a list of alternative CSS selectors for list items with browser-verified match counts (`totalMatches`, `visibleMatches`). If the auto-selected `selector` has 0 visible matches or you are unsure, use `verify_selector` to test candidates on the live page before passing the selector to `generate_crawler_code`. Pick the selector that has `visibleMatches > 0` and is most specific (fewest false matches). You can also use `verify_selector` at any time to test any custom CSS selector against the current page.
 - `run_python_snippet` executes in a sandbox without access to `ctx`. Never reference `ctx` inside snippets.
 
 ## Anti-patterns (AVOID — each costs iterations and delays completion)

@@ -1968,22 +1968,38 @@ if __name__ == "__main__":
    - 【重要】混合内容处理：某些列表项的链接可能直接指向 PDF/DOC 文件（而不是 HTML 详情页）。
    - **文件检测不能仅看 URL 后缀**：有些网站的 PDF 链接路径中不含 .pdf 后缀（如 `/detail-pages/publication/xxx`），必须通过运行时行为判断。
    - 先检查 URL 后缀（.pdf, .doc, .docx, .xls, .xlsx）：如果匹配，直接保存链接，跳过 page.goto()。
-   - **如果 URL 无文件后缀**：正常导航并提取正文，但**必须处理以下所有失败情况**。
+   - **如果 URL 无文件后缀**：正常导航并提取正文。
    - 【强制】详情页内容提取的 try-except 代码结构：
      ```python
      try:
-         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+         detail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
          content_html = ""
-         # ... 尝试用选择器提取正文 ...
-         if not content_html or len(content_html.strip()) < 50:
-             # 正文为空或极短 → 视为文件/不可解析页面 → 回退为 URL 链接
+         # 依次尝试 probe_detail_page 给出的候选 selector
+         for sel in content_selectors:
+             try:
+                 detail_page.wait_for_selector(sel, timeout=8000)
+                 el = detail_page.locator(sel).first
+                 if el.count():
+                     html = el.inner_html()
+                     if len(html.strip()) > 50:
+                         content_html = html
+                         break
+             except Exception:
+                 continue
+         if content_html:
+             article_data["content"] = clean_html_content(content_html, url)
+         else:
+             # 所有候选 selector 都未匹配到足够内容 → 回退为 URL 链接
+             article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
+     except Exception as e:
+         if "ERR_ABORTED" in str(e) or "Download is starting" in str(e):
+             # 下载中断 → 文件链接
              article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
          else:
-             article_data["content"] = clean_html_content(content_html, url)
-     except Exception as e:
-         # 捕获下载中断/页面加载错误 → 一律回退为 URL 链接
-         article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
+             # 其他异常 → 也回退为 URL 链接
+             article_data["content"] = f'<a href="{{url}}" target="_blank">{{url}}</a>'
      ```
+   - 【关键】必须对每个 selector 用 `wait_for_selector(sel, timeout=8000)` 等待，因为某些页面内容在 domcontentloaded 后由 JS 动态渲染。
    - 【严禁】在 content 字段中添加任何额外文字，如 "抓取失败"、"Failed to load"、"Download Document"、"请访问原文" 等。
    - 【严禁】生成不含 target="_blank" 的链接。所有 <a> 标签必须包含 `target="_blank"`。
    - content 字段要么是提取到的完整 HTML 正文，要么是纯链接 `<a href="{{url}}" target="_blank">{{url}}</a>`，没有第三种格式。
@@ -2321,49 +2337,80 @@ if __name__ == "__main__":
             for rec in recommendations:
                 lines.append(f"- ⚠️ {rec}")
 
-        # 详情页正文容器（probe_detail_page 结果）：只提供候选，由大模型自己选
-        detail_probe = enhanced_analysis.get("detail_probe", {})
-        if detail_probe and isinstance(detail_probe, dict):
-            # 检测直接文件（PDF等）详情页 —— 这类页面没有 HTML 正文
-            if detail_probe.get("isDirectFile"):
-                file_type = detail_probe.get("fileType", "file").upper()
-                file_url = detail_probe.get("url", "")
-                lines.append(f"\n### 【关键】详情页是 {file_type} 文件，非 HTML 页面")
-                lines.append(
-                    f"probe_detail_page 检测到详情页返回的是 **{file_type} 文件**（Content-Type 检测）。\n"
-                    f"示例 URL: {file_url[:120]}\n\n"
-                    "**注意**：这类链接的 URL 路径可能**不包含文件后缀**（如 .pdf），不能仅靠 URL 后缀判断。\n"
-                    "**强制要求**：\n"
-                    "1. 在访问每个详情页时，必须用 try-except 包裹 `page.goto()`。\n"
-                    "2. 如果捕获到 'Download is starting' 或 'net::ERR_ABORTED' 异常，说明是文件链接。\n"
-                    "3. 如果页面加载成功但正文容器为空或不存在，也应视为文件/不可解析页面。\n"
-                    "4. 以上所有情况，content 字段**必须**只放一个干净的 HTML 链接，格式固定为：\n"
-                    '   `<a href="{url}" target="_blank">{url}</a>`\n'
-                    "5. **严禁**在 content 中添加任何额外文字（如\"抓取失败\"、\"Failed to load\"、\"Download Document\"等）。\n"
-                )
+        # 详情页探测结果（支持多次 probe，遍历 detail_probes 列表）
+        detail_probes = enhanced_analysis.get("detail_probes") or []
+        # 兼容旧格式：如果只有 detail_probe 没有 detail_probes
+        if not detail_probes:
+            dp = enhanced_analysis.get("detail_probe", {})
+            if dp and isinstance(dp, dict):
+                detail_probes = [dp]
 
-            candidates = detail_probe.get("contentCandidates") or []
-            lines.append("\n### 【详情页正文容器】请从下列候选中自行选择")
-            if candidates:
-                lines.append(
-                    "probe_detail_page 已探测详情页，得到以下正文容器候选（含正文长度、链接密度等）。"
-                    "**请根据正文长度、链接密度、textPreview 等自行判断，从中选择最像文章正文的一个**，在生成代码中仅使用该选择器。不要使用泛化的 `article` 或 `main`。"
-                )
-                for i, c in enumerate(candidates[:10], 1):
-                    sel = c.get("selector", "")
-                    tl = c.get("textLength", 0)
-                    ld = c.get("linkDensity", 0)
-                    preview = (c.get("textPreview") or "")[:60]
-                    is_file = c.get("isFileContainer", False)
-                    file_ext = c.get("fileExt", "")
-                    
-                    extra_info = ""
-                    if is_file:
-                        extra_info = f" | 📄文件下载区域({file_ext}) [正文可能是此文件]"
-                        
-                    lines.append(f"  {i}. selector=`{sel}` | 正文长度={tl} | 链接密度={ld}{extra_info} | 预览={preview!r}")
-            else:
-                lines.append("未探测到正文容器候选，请根据页面结构自行选择正文区域。")
+        has_file_pages = any(p.get("isDirectFile") for p in detail_probes)
+        has_html_pages = any(not p.get("isDirectFile") for p in detail_probes)
+
+        if has_file_pages:
+            file_probes = [p for p in detail_probes if p.get("isDirectFile")]
+            file_type = file_probes[0].get("fileType", "file").upper()
+            file_url = file_probes[0].get("url", "")
+            lines.append(f"\n### 【关键】部分详情页是 {file_type} 文件，非 HTML 页面")
+            mixed_note = "（该网站同时存在 HTML 新闻页和文件下载页，代码必须兼容两种情况）" if has_html_pages else ""
+            lines.append(
+                f"probe_detail_page 检测到某些详情页返回的是 **{file_type} 文件**（Content-Type 检测）。{mixed_note}\n"
+                f"示例 URL: {file_url[:120]}\n\n"
+                "**注意**：这类链接的 URL 路径可能**不包含文件后缀**（如 .pdf），不能仅靠 URL 后缀判断。\n"
+                "**文件检测规则**（只有以下情况才视为文件链接）：\n"
+                "1. 在访问每个详情页时，必须用 try-except 包裹 `page.goto()`。\n"
+                "2. 如果捕获到 'Download is starting' 或 'net::ERR_ABORTED' 异常 → 文件链接。\n"
+                "3. 如果 URL 以 .pdf/.doc/.docx/.xls/.xlsx 结尾 → 文件链接。\n"
+                "4. 以上文件链接情况，content 字段放干净的 HTML 链接：`<a href=\"{url}\" target=\"_blank\">{url}</a>`\n"
+                "5. **严禁**在 content 中添加任何额外文字（如\"抓取失败\"、\"Failed to load\"等）。\n\n"
+                "**正文优先规则**（页面正常加载时）：\n"
+                "6. 如果 `page.goto()` 成功（未抛出下载异常），则该页面是 HTML 页面，**必须尝试提取正文**。\n"
+                "7. 提取前**必须**用 `page.wait_for_selector(selector, timeout=8000)` 等待内容容器出现，\n"
+                "   因为某些页面在 domcontentloaded 后仍需 JS 渲染内容。\n"
+                "8. 依次尝试 probe_detail_page 给出的多个候选 selector，取第一个 inner_html 长度 > 50 的。\n"
+                "9. **只有在所有候选 selector 都等待超时或内容为空后**，才回退为 URL 链接。\n"
+                "10. 即使该网站有些链接是 PDF，也**不影响** HTML 页面的正文提取——不要因为网站有 PDF 就放弃提取正文。\n"
+            )
+
+        # 收集所有 HTML 页面的正文候选（合并去重）
+        all_candidates = []
+        seen_selectors = set()
+        for probe in detail_probes:
+            if probe.get("isDirectFile"):
+                continue
+            for c in (probe.get("contentCandidates") or []):
+                sel = c.get("selector", "")
+                if sel and sel not in seen_selectors:
+                    seen_selectors.add(sel)
+                    all_candidates.append(c)
+
+        if all_candidates:
+            lines.append("\n### 【详情页正文容器】必须从以下候选中选择")
+            lines.append(
+                "probe_detail_page 已用 Playwright 实际访问详情页并分析 DOM 结构，得到以下**已验证的**正文容器候选。\n"
+                "**强制约束**：\n"
+                "- **必须**从以下候选列表中选择一个作为正文提取的 CSS 选择器。\n"
+                "- **严禁**自行编造、猜测或使用不在此列表中的选择器（如 `div.interior-layout__main`、`#ContentPlaceholder_xxx` 等）。\n"
+                "- 请根据正文长度（越长越好）、链接密度（越低越好）来选择最佳候选。\n"
+            )
+            for i, c in enumerate(all_candidates[:10], 1):
+                sel = c.get("selector", "")
+                tl = c.get("textLength", 0)
+                ld = c.get("linkDensity", 0)
+                preview = (c.get("textPreview") or "")[:60]
+                is_file = c.get("isFileContainer", False)
+                file_ext = c.get("fileExt", "")
+
+                extra_info = ""
+                if is_file:
+                    extra_info = f" | 📄文件下载区域({file_ext})"
+
+                lines.append(f"  {i}. selector=`{sel}` | 正文长度={tl} | 链接密度={ld}{extra_info} | 预览={preview!r}")
+        elif detail_probes and not has_html_pages:
+            lines.append("\n### 【详情页】所有探测到的详情页均为文件下载（无 HTML 正文）")
+        else:
+            lines.append("\n### 【详情页正文容器】未探测到正文容器候选，请根据页面结构自行选择正文区域。")
         
         return "\n".join(lines)
 

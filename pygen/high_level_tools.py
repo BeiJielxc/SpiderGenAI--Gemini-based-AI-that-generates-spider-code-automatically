@@ -155,25 +155,57 @@ def _score_candidate_block(
     elif first.name:
         child_sel = first.name
 
-    # --- Build parent-qualified selector for disambiguation ---
+    # --- Build multiple candidate selectors for LLM verification ---
+    _dynamic_tags = {"ul", "ol", "tbody"}
     p = parent_tag if parent_tag is not None else first.parent
     parent_sel = ""
+    ancestor_sel = ""
+
     if p and hasattr(p, "name") and p.name not in (None, "body", "[document]"):
         if p.get("id"):
             parent_sel = f"#{p['id']}"
         elif p.get("class"):
             parent_sel = f"{p.name}.{'.'.join(p['class'])}"
-        else:
-            gp = getattr(p, "parent", None)
-            if gp and hasattr(gp, "name") and gp.name not in (None, "body", "[document]") and gp.get("class"):
-                parent_sel = f".{'.'.join(gp['class'])} {p.name}"
 
-    if parent_sel and child_sel:
-        selector = f"{parent_sel} > {child_sel}"
-    else:
-        selector = child_sel or first.name or "div"
+        if p.name in _dynamic_tags:
+            ancestor = getattr(p, "parent", None)
+            for _ in range(5):
+                if not ancestor or not hasattr(ancestor, "name"):
+                    break
+                if ancestor.name in (None, "body", "[document]"):
+                    break
+                if ancestor.name in ("div", "section", "main", "article") and ancestor.get("class"):
+                    ancestor_sel = f".{'.'.join(ancestor['class'])}"
+                    break
+                ancestor = getattr(ancestor, "parent", None)
 
     bare_selector = child_sel or first.name or "div"
+
+    # Build candidateSelectors: ordered list of selectors from most specific to broadest
+    candidate_selectors: List[Dict[str, str]] = []
+    if parent_sel and child_sel:
+        candidate_selectors.append({
+            "selector": f"{parent_sel} > {child_sel}",
+            "label": "parent-qualified (direct child)",
+        })
+    if ancestor_sel and child_sel:
+        candidate_selectors.append({
+            "selector": f"{ancestor_sel} {child_sel}",
+            "label": "ancestor-qualified (descendant)",
+        })
+    if bare_selector not in [c["selector"] for c in candidate_selectors]:
+        candidate_selectors.append({
+            "selector": bare_selector,
+            "label": "bare (unqualified)",
+        })
+
+    # Default selector: pick parent-qualified if available, else ancestor, else bare
+    if parent_sel and child_sel:
+        selector = f"{parent_sel} > {child_sel}"
+    elif ancestor_sel and child_sel:
+        selector = f"{ancestor_sel} {child_sel}"
+    else:
+        selector = bare_selector
 
     date_selector = ""
     title_selector = "a"
@@ -203,9 +235,11 @@ def _score_candidate_block(
     cls = ".".join(first.get("class", []))
     tag_desc = f"<{tag_name} class='{cls}'>" if cls else f"<{tag_name}>"
 
-    # Parent container description for structureHint
+    # Parent container description for structureHint (prefer stable ancestor over ul/ol)
     parent_container_desc = ""
-    if p and hasattr(p, "name") and p.name not in (None, "body", "[document]"):
+    if ancestor_sel:
+        parent_container_desc = f"ancestor: {ancestor_sel}"
+    elif p and hasattr(p, "name") and p.name not in (None, "body", "[document]"):
         p_cls = ".".join(p.get("class", []))
         parent_container_desc = f"<{p.name} class='{p_cls}'>" if p_cls else f"<{p.name}>"
 
@@ -243,6 +277,7 @@ def _score_candidate_block(
         "count": n,
         "selector": selector,
         "bareSelector": bare_selector,
+        "candidateSelectors": candidate_selectors,
         "titleSelector": title_selector,
         "dateSelector": date_selector,
         "hasLink": has_link,
@@ -731,78 +766,68 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
 
         best = candidates[0]
 
-        # --- Fix 4 & 5: Browser-based selector validation & visibility filtering ---
-        if ctx.browser.page:
+        # --- Browser-based validation of ALL candidate selectors ---
+        candidate_selectors = best.get("candidateSelectors", [])
+        verified_candidates: List[Dict[str, Any]] = []
+
+        if ctx.browser.page and candidate_selectors:
+            js_validate_multi = """
+            (selectors) => {
+                return selectors.map(sel => {
+                    const els = document.querySelectorAll(sel);
+                    let visible = 0;
+                    els.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if (style.visibility !== 'hidden' && style.display !== 'none' && rect.height > 0) {
+                            visible++;
+                        }
+                    });
+                    return { selector: sel, total: els.length, visible: visible };
+                });
+            }
+            """
             try:
-                qualified_sel = best["selector"]
-                bare_sel = best.get("bareSelector", qualified_sel)
-                js_validate = """
-                (args) => {
-                    const { qualifiedSel, bareSel } = args;
-                    const qEls = document.querySelectorAll(qualifiedSel);
-                    const bEls = document.querySelectorAll(bareSel);
-                    let visibleQ = 0;
-                    qEls.forEach(el => {
-                        const style = window.getComputedStyle(el);
-                        const rect = el.getBoundingClientRect();
-                        if (style.visibility !== 'hidden' && style.display !== 'none' && rect.height > 0) {
-                            visibleQ++;
-                        }
-                    });
-                    let visibleB = 0;
-                    bEls.forEach(el => {
-                        const style = window.getComputedStyle(el);
-                        const rect = el.getBoundingClientRect();
-                        if (style.visibility !== 'hidden' && style.display !== 'none' && rect.height > 0) {
-                            visibleB++;
-                        }
-                    });
-                    return {
-                        qualifiedTotal: qEls.length,
-                        bareTotal: bEls.length,
-                        visibleQualified: visibleQ,
-                        visibleBare: visibleB
-                    };
-                }
-                """
-                counts = await ctx.browser.page.evaluate(
-                    js_validate,
-                    {"qualifiedSel": qualified_sel, "bareSel": bare_sel},
+                sel_strings = [c["selector"] for c in candidate_selectors]
+                raw_results = await ctx.browser.page.evaluate(
+                    js_validate_multi, sel_strings,
                 )
-
-                if counts:
-                    q_total = counts.get("qualifiedTotal", 0)
-                    b_total = counts.get("bareTotal", 0)
-                    v_q = counts.get("visibleQualified", 0)
-                    v_b = counts.get("visibleBare", 0)
-
+                for cand, counts in zip(candidate_selectors, raw_results or []):
+                    entry = {
+                        "selector": cand["selector"],
+                        "label": cand["label"],
+                        "totalMatches": counts.get("total", 0),
+                        "visibleMatches": counts.get("visible", 0),
+                    }
+                    verified_candidates.append(entry)
                     ctx.log(
-                        f"[TOOL] Selector validation: "
-                        f"qualified='{qualified_sel}' ({q_total} total, {v_q} visible), "
-                        f"bare='{bare_sel}' ({b_total} total, {v_b} visible)"
+                        f"[TOOL] Candidate selector '{cand['selector']}' ({cand['label']}): "
+                        f"{entry['totalMatches']} total, {entry['visibleMatches']} visible"
                     )
 
-                    if b_total > q_total:
-                        ctx.log(
-                            f"[TOOL] Parent-qualified selector disambiguated: "
-                            f"bare matched {b_total}, qualified matched {q_total}"
-                        )
-
-                    if q_total > v_q and v_q > 0:
-                        best["selectorNote"] = (
-                            f"WARNING: selector '{qualified_sel}' matches {q_total} elements "
-                            f"but only {v_q} are visible. Use this selector to target visible items only."
-                        )
-
-                    if q_total == 0 and v_b > 0:
-                        ctx.log(
-                            f"[TOOL] Qualified selector matched 0 elements, "
-                            f"falling back to bare selector '{bare_sel}'"
-                        )
-                        best["selector"] = bare_sel
+                # Auto-select best: pick the first candidate with visible > 0
+                auto_selected = False
+                for vc in verified_candidates:
+                    if vc["visibleMatches"] > 0:
+                        best["selector"] = vc["selector"]
+                        auto_selected = True
+                        break
+                if not auto_selected:
+                    ctx.log("[TOOL] WARNING: no candidate selector matched visible elements")
 
             except Exception as e:
-                ctx.log(f"[TOOL] Selector validation skipped: {e}")
+                ctx.log(f"[TOOL] Candidate selector validation skipped: {e}")
+                verified_candidates = [
+                    {"selector": c["selector"], "label": c["label"],
+                     "totalMatches": -1, "visibleMatches": -1}
+                    for c in candidate_selectors
+                ]
+        elif candidate_selectors:
+            verified_candidates = [
+                {"selector": c["selector"], "label": c["label"],
+                 "totalMatches": -1, "visibleMatches": -1}
+                for c in candidate_selectors
+            ]
 
         items = best.get("items", [])
 
@@ -827,6 +852,7 @@ async def tool_extract_list_and_pagination(ctx: ToolContext) -> ToolResult:
         best_candidate_info = {
             "selector": best["selector"],
             "bareSelector": best.get("bareSelector", best["selector"]),
+            "candidateSelectors": verified_candidates,
             "titleSelector": best["titleSelector"],
             "dateSelector": best["dateSelector"],
             "score": best["score"],
@@ -1498,7 +1524,21 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                     "fileType": "pdf"
                 }
                 ctx.log(f"[TOOL] probe_detail_page: {summary}")
-                # We can close the page early
+
+                # 写入 enhanced_analysis（追加到列表，支持多次 probe）
+                if "detail_probes" not in ctx.enhanced_analysis:
+                    ctx.enhanced_analysis["detail_probes"] = []
+                ctx.enhanced_analysis["detail_probes"].append({
+                    "url": target_url,
+                    "isDirectFile": True,
+                    "fileType": "pdf",
+                    "contentSelector": "",
+                    "contentCandidates": payload["contentCandidates"],
+                    "structureHint": payload["structureHint"],
+                })
+                # 兼容旧字段
+                ctx.enhanced_analysis["detail_probe"] = ctx.enhanced_analysis["detail_probes"][-1]
+
                 await detail_page.close()
                 return ToolResult(success=True, data=payload, summary=summary, suggested_next_tools=["generate_crawler_code"])
 
@@ -1689,13 +1729,19 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
                 "structureHint": structure_hint,
             }
 
-            ctx.enhanced_analysis["detail_probe"] = {
+            probe_entry = {
+                "url": target_url,
+                "isDirectFile": False,
                 "contentSelector": content_selector,
                 "contentTagName": content_tag_name,
                 "contentCandidates": content_candidates,
                 "titleSelector": title_selector,
                 "structureHint": structure_hint,
             }
+            if "detail_probes" not in ctx.enhanced_analysis:
+                ctx.enhanced_analysis["detail_probes"] = []
+            ctx.enhanced_analysis["detail_probes"].append(probe_entry)
+            ctx.enhanced_analysis["detail_probe"] = probe_entry
 
             summary = f"Detail page probed: {structure_hint}"
             ctx.log(f"[TOOL] probe_detail_page: {summary}")
@@ -1726,6 +1772,110 @@ async def tool_probe_detail_page(ctx: ToolContext, url: str = "") -> ToolResult:
 
 
 # =====================================================================
+# tool_verify_selector – LLM-driven selector verification
+# =====================================================================
+
+async def tool_verify_selector(ctx: ToolContext, selector: str, description: str = "") -> ToolResult:
+    """
+    Test a CSS selector against the CURRENT live page using Playwright.
+
+    Returns match count, visible count, and a preview of matched elements
+    so the LLM can judge whether this selector targets the correct elements.
+
+    This is a read-only tool – it does NOT mutate page state.
+    """
+    selector = (selector or "").strip()
+    if not selector:
+        return ToolResult(
+            success=False,
+            error="selector parameter is required",
+            summary="No selector provided",
+            error_code="missing_param",
+            recoverable=True,
+        )
+
+    if not ctx.browser.page:
+        return ToolResult(
+            success=False,
+            error="No browser page available",
+            summary="No browser page – call open_page first",
+            error_code="no_browser",
+            recoverable=True,
+            suggested_next_tools=["open_page"],
+        )
+
+    try:
+        js_code = """
+        (sel) => {
+            const els = document.querySelectorAll(sel);
+            let visible = 0;
+            const previews = [];
+            els.forEach((el, idx) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                const isVisible = style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && rect.height > 0;
+                if (isVisible) visible++;
+                if (previews.length < 3) {
+                    const classes = el.className
+                        ? (typeof el.className === 'string' ? el.className : '')
+                        : '';
+                    const text = (el.textContent || '').trim().substring(0, 120);
+                    const tag = el.tagName.toLowerCase();
+                    const link = el.querySelector('a');
+                    const href = link ? link.href : '';
+                    previews.push({
+                        tag: tag,
+                        classes: classes,
+                        text: text,
+                        href: href,
+                        visible: isVisible,
+                        index: idx
+                    });
+                }
+            });
+            return { total: els.length, visible: visible, previews: previews };
+        }
+        """
+        result = await ctx.browser.page.evaluate(js_code, selector)
+
+        total = result.get("total", 0)
+        visible = result.get("visible", 0)
+        previews = result.get("previews", [])
+
+        desc_label = f" ({description})" if description else ""
+        summary = (
+            f"selector '{selector}'{desc_label}: "
+            f"{total} total, {visible} visible"
+        )
+        ctx.log(f"[TOOL] verify_selector: {summary}")
+
+        return ToolResult(
+            success=True,
+            data={
+                "selector": selector,
+                "description": description,
+                "totalMatches": total,
+                "visibleMatches": visible,
+                "previews": previews,
+            },
+            summary=summary,
+            suggested_next_tools=["generate_crawler_code", "verify_selector"],
+        )
+
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            error=f"verify_selector failed: {exc}",
+            summary=f"Failed to evaluate selector '{selector}': {exc}",
+            error_code="evaluate_failed",
+            recoverable=True,
+            suggested_next_tools=["verify_selector"],
+        )
+
+
+# =====================================================================
 # __all__
 # =====================================================================
 
@@ -1734,4 +1884,5 @@ __all__ = [
     "tool_capture_api_and_infer_params",
     "tool_turn_page_and_verify_change",
     "tool_probe_detail_page",
+    "tool_verify_selector",
 ]
