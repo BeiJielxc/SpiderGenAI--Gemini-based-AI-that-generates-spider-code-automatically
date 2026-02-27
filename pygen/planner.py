@@ -279,7 +279,11 @@ class AgentPlanner:
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": 4096},
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
         }
 
         resp = http_requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=120, stream=True)
