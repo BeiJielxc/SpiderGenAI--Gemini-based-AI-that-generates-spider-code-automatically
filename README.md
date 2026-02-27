@@ -6,6 +6,7 @@
 - [功能 / Key features](#features)
 - [快速开始 / Quickstart](#quickstart)
   - [后端依赖安装 / Backend install](#backend-install)
+  - [Docker 沙箱环境 / Docker Sandbox Setup](#docker-sandbox)
   - [配置 config.yaml / Configure config.yaml](#configure-config)
   - [启动/部署 Chrome + CDP / Chrome + CDP](#chrome-cdp)
   - [启动后端 / Run backend](#run-backend)
@@ -70,6 +71,7 @@ Agent-driven autonomous website analysis and crawler generation, with dynamic to
 - **Python**：建议 3.10+
 - **Node.js**：建议 18+ / 20+
 - **Google Chrome**：已安装（后端会自动寻找 Chrome 并启动 CDP）
+- **Docker Desktop**：Agent 生成的代码会在 Docker 容器中执行验证（Critic 质量关卡），**强烈推荐安装**。未安装时系统回退到本地子进程执行（安全性和隔离性较低）。详见下方 [Docker 沙箱环境](#docker-sandbox) 章节
 
 ---
 
@@ -98,8 +100,148 @@ python -m playwright install chromium
 
 ---
 
+<a id="docker-sandbox"></a>
+### 2) Docker 沙箱环境配置 (Docker Sandbox Setup)
+
+Agent 生成的爬虫代码会在 **Docker 容器**中先行执行验证（Critic 质量关卡 → 沙箱运行 → 检查输出），因此需要本机安装 Docker 环境。若未检测到 Docker，系统会自动回退到本地子进程执行（`local` 模式），隔离性和安全性较低。
+
+#### 2.1) 安装 Docker Desktop
+
+##### Windows
+
+1. 下载 Docker Desktop：<https://www.docker.com/products/docker-desktop/>
+2. 双击安装包运行，安装向导中**勾选 "Use WSL 2 instead of Hyper-V"**（推荐）
+3. 安装完成后**重启电脑**
+4. 启动 Docker Desktop，等待左下角引擎状态变为绿色 **Running**
+5. 打开 PowerShell 验证：
+
+```powershell
+docker --version
+docker info
+```
+
+> **Windows 前置要求**
+> - 需要 **WSL 2**（Windows Subsystem for Linux 2）。若系统提示未安装，以管理员身份打开 PowerShell 执行：
+>   ```powershell
+>   wsl --install
+>   ```
+>   然后重启电脑。
+> - BIOS 中须启用虚拟化（Intel VT-x / AMD-V）。大部分笔记本出厂已启用，如遇报错请进 BIOS 手动开启。
+> - 如遇 Windows 防火墙提示，请允许 Docker Desktop 通过。
+
+##### macOS
+
+1. 下载 Docker Desktop（根据芯片选择对应版本）：
+   - **Apple Silicon (M1/M2/M3/M4)**：<https://desktop.docker.com/mac/main/arm64/Docker.dmg>
+   - **Intel**：<https://desktop.docker.com/mac/main/amd64/Docker.dmg>
+2. 打开 `.dmg`，将 Docker 拖拽到 Applications 文件夹
+3. 启动 Docker Desktop，首次打开时 macOS 会弹出安全性提示 → 前往"系统设置 → 隐私与安全性"允许即可
+4. 等待菜单栏 Docker 鲸鱼图标稳定（不再转动），打开终端验证：
+
+```bash
+docker --version
+docker info
+```
+
+---
+
+#### 2.2) 构建沙箱镜像（推荐，预装所有依赖）
+
+项目根目录已包含 `Dockerfile`，可一键构建包含所有 Python 依赖的沙箱镜像。**Windows 与 macOS 命令相同**：
+
+```bash
+# 在项目根目录执行（首次构建约需 3-5 分钟，取决于网络速度）
+docker build -t pygen-sandbox .
+```
+
+该命令会自动完成以下步骤：
+
+1. 拉取基础镜像 `mcr.microsoft.com/playwright/python:v1.41.0-jammy`（含 Python 3 + Playwright + Chromium）
+2. 复制 `pygen/requirements.txt` 并执行 `pip install`，**安装所有后端依赖**（requests、httpx、beautifulsoup4、pydantic 等）
+3. 安装 Playwright Chromium 浏览器运行时
+
+> 构建完成后，在 `config.yaml` 的 `sandbox` 部分指定你构建的镜像名（见下方配置章节）：
+>
+> ```yaml
+> sandbox:
+>   enabled: true
+>   backend: docker
+>   docker_image: "pygen-sandbox"
+>   docker_auto_pull: false
+> ```
+
+**如果后续更新了 `pygen/requirements.txt`（添加了新的 Python 库），需要重新执行 `docker build -t pygen-sandbox .` 以更新镜像。**
+
+---
+
+#### 2.3) 使用默认基础镜像（快速上手，不推荐）
+
+如果不想手动构建，系统首次运行时会**自动拉取**微软官方 Playwright 镜像：
+
+```bash
+# 也可手动预拉取（可选）
+docker pull mcr.microsoft.com/playwright/python:v1.41.0-jammy
+```
+
+> **注意**：基础镜像**不包含** `requirements.txt` 中的额外依赖（`requests`、`beautifulsoup4`、`httpx` 等）。Agent 会在运行时通过 `install_python_packages` 工具按需安装，但**每次新建容器都需要重新安装**，首次验证耗时更长。推荐使用 2.2 的构建方式。
+
+---
+
+#### 2.4) Docker Desktop 资源配置建议
+
+打开 Docker Desktop → **Settings → Resources**：
+
+| 资源 | 推荐最低值 | 说明 |
+|------|-----------|------|
+| **CPU** | ≥ 2 核 | 沙箱执行生成脚本 + 浏览器渲染 |
+| **Memory** | ≥ 4 GB | Playwright Chromium 内存占用较高 |
+| **Disk** | ≥ 10 GB | 基础镜像约 2-3 GB + 构建缓存 |
+
+> **Windows WSL 2 用户**：资源上限由 WSL 控制。如需调整，编辑 `%USERPROFILE%\.wslconfig`：
+>
+> ```ini
+> [wsl2]
+> memory=8GB
+> processors=4
+> ```
+>
+> 保存后在 PowerShell 执行 `wsl --shutdown` 使配置生效。
+
+---
+
+#### 2.5) 验证 Docker 沙箱环境
+
+```bash
+# 1. 验证 Docker 守护进程正常
+docker run --rm hello-world
+
+# 2. 验证沙箱镜像已构建（若使用 2.2 构建方式）
+docker run --rm pygen-sandbox python -c "import requests; import bs4; import httpx; print('All dependencies OK')"
+
+# 3. 验证 Playwright 可用
+docker run --rm pygen-sandbox python -c "from playwright.sync_api import sync_playwright; print('Playwright OK')"
+```
+
+如果以上命令全部输出正常，Docker 沙箱环境即就绪。
+
+---
+
+#### 2.6) 重要注意事项
+
+1. **Docker Desktop 必须保持运行**：后端启动任务时会通过 Docker CLI 创建沙箱容器。如果 Docker Desktop 未启动，系统自动回退到 `local` 模式
+2. **首次拉取/构建较慢**：Playwright 基础镜像约 2 GB，请确保网络通畅；后续构建利用缓存会很快
+3. **镜像与 requirements.txt 同步**：每次修改 `pygen/requirements.txt` 后，务必重新 `docker build -t pygen-sandbox .`，否则沙箱中会缺少新增的库
+4. **磁盘清理**：长时间使用后可运行 `docker system prune -f` 清理悬空镜像和停止的容器
+5. **网络代理**：如果你在公司代理环境下，Docker 构建时可能需要配置代理。在 Docker Desktop → Settings → Resources → Proxies 中设置，或在构建时传入：
+   ```bash
+   docker build --build-arg HTTP_PROXY=http://proxy:port --build-arg HTTPS_PROXY=http://proxy:port -t pygen-sandbox .
+   ```
+6. **多任务并发**：每个任务会启动独立的沙箱容器（容器名格式 `pygen-exec-<session_id>`），任务结束后自动销毁（`--rm`）
+
+---
+
 <a id="configure-config"></a>
-### 2) 配置 `config.yaml` (Configure `config.yaml`)
+### 3) 配置 `config.yaml` (Configure `config.yaml`)
 
 本项目会优先读取：
 
@@ -126,16 +268,27 @@ cdp:
   auto_select_port: true
   user_data_dir: "D:/llm_mcp_genpy_runtime/chrome-profile"
   timeout: 60
+
+# Docker 沙箱配置（如已按上一步构建镜像）
+sandbox:
+  enabled: true
+  backend: auto               # docker / local / auto
+  docker_image: "pygen-sandbox"
+  docker_auto_pull: false      # 本地构建的镜像无需拉取
+  docker_mount_workdir: true
+  docker_disable_network: false
 ```
 
 > macOS 提示：`cdp.user_data_dir` 建议使用类似 `"/Users/<you>/llm_mcp_genpy_runtime/chrome-profile"` 或 `"$HOME/llm_mcp_genpy_runtime/chrome-profile"`（YAML 中可直接写绝对路径字符串）。
+
+> 如果没有构建自定义镜像，可省略 `sandbox` 段或将 `docker_image` 设为默认值 `"mcr.microsoft.com/playwright/python:v1.41.0-jammy"`，并将 `docker_auto_pull` 设为 `true`。
 
 Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。建议只提交模板文件（如 `config_copy.yaml` 或你自己的 `config.yaml.example`）。
 
 ---
 
 <a id="chrome-cdp"></a>
-### 3) 启动/部署 Chrome + CDP (Chrome + CDP)
+### 4) 启动/部署 Chrome + CDP (Chrome + CDP)
 
 本项目默认会在后端启动任务时**自动启动 Chrome（CDP 模式）**，你通常不需要手工启动。
 
@@ -180,7 +333,7 @@ macOS 下可执行（注意应用路径中包含空格）：
 ---
 
 <a id="run-backend"></a>
-### 4) 启动后端 (Run backend)
+### 5) 启动后端 (Run backend)
 
 在项目根目录执行：
 
@@ -198,7 +351,7 @@ python pygen/api.py
 ---
 
 <a id="run-frontend"></a>
-### 5) 启动前端 (Run frontend)
+### 6) 启动前端 (Run frontend)
 
 新开一个终端：
 
