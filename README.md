@@ -16,8 +16,8 @@
 - [Agent 架构 / Agent Architecture](#agent-architecture)
   - [端到端流程 / End-to-end flow](#e2e-flow)
   - [Planner（ReAct 自主决策循环） / Planner (ReAct Loop)](#planner)
-  - [Tool Registry（工具注册与路由） / Tool Registry & Routing](#tool-registry)
-  - [工具体系 / Tool Ecosystem](#tool-ecosystem)
+  - [Tool Registry（agent skills注册与路由） / Tool Registry & Routing](#tool-registry)
+  - [Agent skills/工具体系介绍](#tool-ecosystem)
   - [Critic（质量评估与自动修复） / Critic (Quality Gate)](#critic)
   - [Executor Session（沙箱执行） / Executor Session (Sandbox)](#executor-session)
   - [Artifact Store（大载荷存储） / Artifact Store](#artifact-store)
@@ -502,7 +502,7 @@ The core is a **ReAct-style autonomous agent** composed of the following compone
           ┌────────────────┼────────────────┐
           ▼                ▼                ▼
    ┌─────────────┐ ┌─────────────┐ ┌──────────────┐
-   │   Planner   │ │Tool Registry│ │   Critic     │
+   │   Planner   │ │Agent skills │ │   Critic     │
    │ (ReAct Loop)│◀│ (Router)    │ │(Quality Gate)│
    │  LLM ←→ Act │ │ 20+ tools   │ │ 3-round loop │
    └──────┬──────┘ └──────┬──────┘ └──────┬───────┘
@@ -601,15 +601,15 @@ class RegisteredTool:
 ---
 
 <a id="tool-ecosystem"></a>
-### 工具体系 (Tool Ecosystem)
+### Agent skills (Tool Ecosystem) Agent技能模组
 
-工具分为 4 层，20+ 个工具供 Planner 调用：
+技能/工具分为 4 层，20+ 个技能/工具供 llm 调用：
 
-#### 原子工具 (Atomic Tools) — `pygen/tools.py`
+#### 原子工具 (Atomic Skills/Tools) — `pygen/tools.py`
 
 底层浏览器/网络操作，单一职责：
 
-| 工具 | 说明 |
+| 技能/工具 | 说明 |
 |------|------|
 | `open_page` | 打开目标 URL |
 | `scroll_page` | 触发懒加载 |
@@ -621,20 +621,20 @@ class RegisteredTool:
 | `detect_data_status` | 检测数据/空/加载/错误状态 |
 | `analyze_page` | 综合分析页面结构 |
 
-#### 高级工具 (High-Level Tools) — `pygen/high_level_tools.py`
+#### 高级工具 (High-Level Skills/Tools) — `pygen/high_level_tools.py`
 
-封装多步 CDP/Playwright 工作流：
+本质是经过业务积累的封装多步 CDP/Playwright 工作流：
 
-| 工具 | 说明 |
+| 技能/工具 | 说明 |
 |------|------|
 | `extract_list_and_pagination` | 自动发现列表项 + CSS 选择器 + 分页控件 + 日期范围 |
 | `capture_api_and_infer_params` | 动态 API 嗅探 + 参数归因（page/date/category） |
 | `turn_page_and_verify_change` | 翻页并验证内容确实变化 |
 | `probe_detail_page` | 在新标签页探测详情页正文容器 |
 
-#### 导航与策略工具 (Navigation & Strategy Tools)
+#### 导航与策略技能/工具 (Navigation & Strategy Tools)
 
-| 工具 | 说明 |
+| 技能/工具 | 说明 |
 |------|------|
 | `get_site_menu_tree` | 提取站点菜单树 |
 | `probe_navigation` | 点击菜单路径，捕获 API/筛选映射 |
@@ -642,9 +642,9 @@ class RegisteredTool:
 | `smart_date_api_scan` | 四层渐进式日期 API 检测 |
 | `enhanced_page_analysis` | 浏览器原生增强分析 |
 
-#### 生成与质量工具 (Generation & Quality Tools)
+#### 生成与质量检测技能/工具 (Generation & Quality Tools)
 
-| 工具 | 说明 |
+| 技能/工具 | 说明 |
 |------|------|
 | `generate_crawler_code` | 基于收集的上下文调用 LLM 生成爬虫脚本 |
 | `validate_code` | 静态代码校验 |
@@ -725,7 +725,9 @@ Code → Static Check → Runtime Execute → Classify Failure
 <a id="date-detection"></a>
 ## 日期控件检测与 API 提取 (Date Detection & API Extraction)
 
-当使用 `smart_date_api_scan` 工具时，系统采用**四层渐进式架构**自动检测页面的日期筛选接口，核心实现在 `pygen/date_api_extractor.py`。
+这个是agent独创的根据业务经验积累与反复调试的高级agent skill。
+
+当使用 `smart_date_api_scan` 技能时，系统采用**四层渐进式架构**自动检测页面的日期筛选接口，核心实现在 `pygen/date_api_extractor.py`。
 
 ### 四层架构 (Four-layer Architecture)
 
