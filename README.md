@@ -147,30 +147,65 @@ docker info
 
 #### 2.2) 构建沙箱镜像（推荐，预装所有依赖）
 
-项目根目录已包含 `Dockerfile`，可一键构建包含所有 Python 依赖的沙箱镜像。**Windows 与 macOS 命令相同**：
+项目根目录已包含 `Dockerfile`，会在构建时把 `pygen/requirements.txt` 里的**所有 Python 库**安装进镜像。**Windows 与 macOS 命令完全相同**，在项目根目录打开终端执行：
 
 ```bash
-# 在项目根目录执行（首次构建约需 3-5 分钟，取决于网络速度）
 docker build -t pygen-sandbox .
 ```
 
-该命令会自动完成以下步骤：
+> 首次构建需要下载基础镜像（约 2 GB）+ 安装依赖，预计 3-10 分钟（取决于网络）。后续重建利用缓存会很快。
 
-1. 拉取基础镜像 `mcr.microsoft.com/playwright/python:v1.41.0-jammy`（含 Python 3 + Playwright + Chromium）
-2. 复制 `pygen/requirements.txt` 并执行 `pip install`，**安装所有后端依赖**（requests、httpx、beautifulsoup4、pydantic 等）
-3. 安装 Playwright Chromium 浏览器运行时
+##### Dockerfile 内部流程（无需手动操作，`docker build` 会自动执行）
 
-> 构建完成后，在 `config.yaml` 的 `sandbox` 部分指定你构建的镜像名（见下方配置章节）：
->
-> ```yaml
-> sandbox:
->   enabled: true
->   backend: docker
->   docker_image: "pygen-sandbox"
->   docker_auto_pull: false
-> ```
+```text
+步骤 1  拉取基础镜像 mcr.microsoft.com/playwright/python:v1.41.0-jammy
+        → 内含 Python 3 + Playwright + Chromium 浏览器
 
-**如果后续更新了 `pygen/requirements.txt`（添加了新的 Python 库），需要重新执行 `docker build -t pygen-sandbox .` 以更新镜像。**
+步骤 2  COPY pygen/requirements.txt → 容器内
+        RUN pip install -r requirements.txt
+        → 安装以下所有库：
+        ┌──────────────────────────────────────────────────┐
+        │  playwright          # 浏览器自动化               │
+        │  playwright-stealth  # 反爬特征隐藏               │
+        │  openai              # LLM API 客户端            │
+        │  pyyaml              # YAML 配置解析              │
+        │  requests            # HTTP 请求                  │
+        │  pydantic            # 数据验证                   │
+        │  fastapi             # API 服务框架               │
+        │  uvicorn             # ASGI Server               │
+        │  httpx               # 异步 HTTP 客户端           │
+        │  beautifulsoup4      # HTML 解析                  │
+        │  lxml                # 快速 XML/HTML 解析引擎      │
+        │  rich                # 终端美化输出               │
+        └──────────────────────────────────────────────────┘
+
+步骤 3  RUN playwright install chromium
+        → 确保浏览器二进制可用
+
+步骤 4  COPY . . → 将项目代码拷入镜像
+```
+
+##### 构建完成后：配置 `config.yaml`
+
+在 `config.yaml` 中添加 `sandbox` 段，指向你构建的镜像：
+
+```yaml
+sandbox:
+  enabled: true
+  backend: docker            # 使用 Docker 沙箱
+  docker_image: "pygen-sandbox"   # 刚才 docker build -t 后面的名字
+  docker_auto_pull: false    # 本地已构建，无需自动拉取
+```
+
+##### requirements.txt 更新后必须重新构建
+
+每次修改 `pygen/requirements.txt`（添加/删除/升级库）后，**必须重新执行**：
+
+```bash
+docker build -t pygen-sandbox .
+```
+
+否则沙箱容器中会缺少新增的库，导致 Agent 验证代码时报 `ModuleNotFoundError`。
 
 ---
 
@@ -215,8 +250,8 @@ docker pull mcr.microsoft.com/playwright/python:v1.41.0-jammy
 # 1. 验证 Docker 守护进程正常
 docker run --rm hello-world
 
-# 2. 验证沙箱镜像已构建（若使用 2.2 构建方式）
-docker run --rm pygen-sandbox python -c "import requests; import bs4; import httpx; print('All dependencies OK')"
+# 2. 验证沙箱镜像中所有关键库已安装（若使用 2.2 构建方式）
+docker run --rm pygen-sandbox python -c "import requests; import bs4; import httpx; import lxml; import pydantic; print('All dependencies OK')"
 
 # 3. 验证 Playwright 可用
 docker run --rm pygen-sandbox python -c "from playwright.sync_api import sync_playwright; print('Playwright OK')"
@@ -282,8 +317,6 @@ sandbox:
 > macOS 提示：`cdp.user_data_dir` 建议使用类似 `"/Users/<you>/llm_mcp_genpy_runtime/chrome-profile"` 或 `"$HOME/llm_mcp_genpy_runtime/chrome-profile"`（YAML 中可直接写绝对路径字符串）。
 
 > 如果没有构建自定义镜像，可省略 `sandbox` 段或将 `docker_image` 设为默认值 `"mcr.microsoft.com/playwright/python:v1.41.0-jammy"`，并将 `docker_auto_pull` 设为 `true`。
-
-Tip: **不要把真实的 `config.yaml` 提交到 GitHub**（包含密钥）。建议只提交模板文件（如 `config_copy.yaml` 或你自己的 `config.yaml.example`）。
 
 ---
 
