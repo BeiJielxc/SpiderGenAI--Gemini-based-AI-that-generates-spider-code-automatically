@@ -6,7 +6,7 @@
 # =============================================================================
 # 使用方法：修改 active 字段切换模型，无需注释或删除其他配置
 # 
-# 支持的模型：
+# 支持的模型：推荐用gemini3 pro preview
 #   - qwen: 阿里通义千问 (DashScope API)
 #   - qwen-coder: 通义千问 Coder 系列
 #   - gemini: Google Gemini
@@ -20,12 +20,6 @@ llm:
   # 当前激活的模型（修改这里切换模型，推荐用gemini 3 pro preview）
   active:  gemini
 
-  
-  # 是否启用“自动修复 + 静态检查 + 生成后后处理（注入韧性层等）”
-  # - true（默认推荐）：更稳，可能会额外调用 LLM 做修复
-  # - false：完全不做修复/检查/后处理，直接运行 LLM 原始生成代码（风险更高，但如果调用的是强力模型可忽略）
-  auto_repair: false
-  
   # 阿里通义千问（能用）
   qwen3-max:
     api_key: "YOUR_API_KEY"
@@ -38,7 +32,7 @@ llm:
     model: "qwen3-coder-plus"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   
-  # 通义千问 Next 系列
+  # 通义千问 Next 系列(一般)
   qwen-next:
     api_key: "YOUR_API_KEY"
     model: "qwen3-next-80b-a3b-instruct"
@@ -50,7 +44,7 @@ llm:
     model: "qwen3-vl-plus"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-  # kimi能用但是慢
+  # kimi（能用但是慢）
   kimi-k2.5:
     api_key: "YOUR_API_KEY"
     model: "kimi-k2.5"
@@ -80,7 +74,7 @@ llm:
     model: "claude-sonnet-4-20250514"
     base_url: "https://api.anthropic.com/v1"
   
-  # Anthropic Claude Opus（爬虫任务上仅次于gemini）
+  # Anthropic Claude Opus（好用爬虫任务上仅次于gemini）
   opus:
     api_key: "YOUR_API_KEY"
     model: "claude-opus-4-5"
@@ -96,6 +90,20 @@ cdp:
   # - false（默认）：显示浏览器窗口，方便本地开发调试
   # - true：无头模式，不显示浏览器窗口（Linux 服务器部署必须设为 true）
   headless: true
+
+# =============================================================================
+# Agent 配置
+# =============================================================================
+agent:
+  max_iterations: 30  # Agent 模式最大迭代轮次
+
+# =============================================================================
+# 服务端配置（多人在线 / 队列 / SSE）
+# =============================================================================
+server:
+  enable_queue: true      # 本地开发关闭；线上部署改为 true
+  max_concurrency: 1       # 允许同时运行的最大任务数
+  enable_sse: true       # 本地开发关闭；线上部署改为 true
 
 # 搜索配置
 search:

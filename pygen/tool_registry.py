@@ -500,7 +500,12 @@ def create_default_tool_registry() -> ToolRegistry:
     registry.register_tool(
         ToolSpec(
             name="get_site_menu_tree",
-            description="Extract site menu tree for multi-section crawling.",
+            description=(
+                "Extract hierarchical site menu tree to discover sub-sections/categories. "
+                "REQUIRED for tasks involving multi-category crawling or site structure exploration. "
+                "NOTE: Do NOT use this tool if the task is focused on a single specific page/list "
+                "and does not require navigating multiple sections."
+            ),
             parameters={"max_depth": {"type": "integer", "default": 3, "description": "Tree max depth"}},
         ),
         tool_get_site_menu_tree,
@@ -509,7 +514,12 @@ def create_default_tool_registry() -> ToolRegistry:
     registry.register_tool(
         ToolSpec(
             name="probe_navigation",
-            description="Click selected menu paths and capture API/filter mapping changes.",
+            description=(
+                "Click selected menu paths to capture API/filter mappings. "
+                "CRITICAL: Do NOT guess paths from visual text. "
+                "You should use valid leaf paths returned by 'tool_get_site_menu_tree'. "
+                "Using guessed paths will fail to identify the correct category hierarchy."
+            ),
             parameters={"paths": {"type": "array", "description": "Menu paths to probe; empty means all leaves."}},
         ),
         tool_probe_navigation,

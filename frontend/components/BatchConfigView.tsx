@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -28,9 +28,9 @@ type BatchField =
   | 'listPageName'
   | 'startDate'
   | 'endDate'
+  | 'taskObjective'
   | 'outputScriptName'
   | 'runMode'
-  | 'crawlMode'
   | 'downloadReport';
 
 interface BatchRow {
@@ -39,9 +39,9 @@ interface BatchRow {
   listPageName: string;
   startDate: string;
   endDate: string;
+  taskObjective: string;
   outputScriptName: string;
   runMode: string;
-  crawlMode: string;
   downloadReport: string;
   sourceCredibility: string;
   attachments: Attachment[];
@@ -53,12 +53,6 @@ const RUN_MODE_OPTIONS = [
   { value: 'enterprise_report', label: '企业报告下载' },
   { value: 'news_report_download', label: '新闻报告下载' },
   { value: 'news_sentiment', label: '新闻舆情爬取' }
-] as const;
-
-const CRAWL_MODE_OPTIONS = [
-  { value: 'single_page', label: '单一板块爬取' },
-  { value: 'auto_detect', label: '自动探测板块并爬取' },
-  { value: 'date_range_api', label: '日期筛选类网站爬取' }
 ] as const;
 
 const DOWNLOAD_OPTIONS = [
@@ -76,19 +70,6 @@ const RUN_MODE_MAP: Record<string, string> = {
   '新闻舆情爬取': 'news_sentiment'
 };
 
-const CRAWL_MODE_MAP: Record<string, string> = {
-  single_page: 'single_page',
-  multi_page: 'auto_detect',
-  auto_detect: 'auto_detect',
-  date_range_api: 'date_range_api',
-  date_filter: 'date_range_api',
-  '单一板块爬取': 'single_page',
-  '多板块爬取': 'auto_detect',
-  '自动探测板块并爬取': 'auto_detect',
-  '日期筛选类网站爬取': 'date_range_api',
-  // 兼容旧模板：将“多板块爬取”按新语义映射到自动探测
-};
-
 const DOWNLOAD_MAP: Record<string, string> = {
   yes: 'yes',
   no: 'no',
@@ -101,7 +82,6 @@ const DOWNLOAD_MAP: Record<string, string> = {
 };
 
 const VALID_RUN_MODE_LABELS = RUN_MODE_OPTIONS.map((item) => item.label);
-const VALID_CRAWL_MODE_LABELS = CRAWL_MODE_OPTIONS.map((item) => item.label);
 const VALID_DOWNLOAD_LABELS = DOWNLOAD_OPTIONS.map((item) => item.label);
 
 const DEFAULT_ROW: BatchRow = {
@@ -110,9 +90,9 @@ const DEFAULT_ROW: BatchRow = {
   listPageName: '',
   startDate: '',
   endDate: '',
+  taskObjective: '',
   outputScriptName: '',
   runMode: '',
-  crawlMode: '',
   downloadReport: '',
   sourceCredibility: '',
   attachments: [],
@@ -168,11 +148,6 @@ const normalizeRunMode = (value: string): string => {
   return RUN_MODE_MAP[key] || RUN_MODE_MAP[key.toLowerCase()] || '';
 };
 
-const normalizeCrawlMode = (value: string): string => {
-  const key = value.trim();
-  return CRAWL_MODE_MAP[key] || CRAWL_MODE_MAP[key.toLowerCase()] || '';
-};
-
 const normalizeDownload = (value: string): string => {
   const key = value.trim();
   return DOWNLOAD_MAP[key] || DOWNLOAD_MAP[key.toLowerCase()] || '';
@@ -224,9 +199,9 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
       if (!row.listPageName.trim()) errors.listPageName = '必填';
       if (!row.startDate.trim()) errors.startDate = '必填';
       if (!row.endDate.trim()) errors.endDate = '必填';
+      if (!row.taskObjective.trim()) errors.taskObjective = '必填';
       if (!row.outputScriptName.trim()) errors.outputScriptName = '必填';
       if (!row.runMode) errors.runMode = '必选';
-      if (!row.crawlMode) errors.crawlMode = '必选';
       if (!row.downloadReport) errors.downloadReport = '必选';
 
       if (row.startDate && row.endDate) {
@@ -241,10 +216,6 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
       const scriptName = row.outputScriptName.trim();
       if (scriptName && (scriptNameCount.get(scriptName) || 0) > 1) {
         errors.outputScriptName = '脚本名称重复';
-      }
-
-      if (row.crawlMode === 'auto_detect' && row.attachments.length === 0) {
-        errors.attachments = '自动探测模式需上传参考图';
       }
 
       return { ...row, errors };
@@ -324,10 +295,10 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
 
   const downloadTemplate = () => {
     const csv = [
-      '页面链接,页面名称,开始时间,结束时间,支持图片（提交配置后在前端上传）,输出脚本名称,运行模式,爬取模式,是否下载报告',
-      'https://www.ccxi.com.cn/creditrating/result,中诚信-信用评级-企业评级板块所有子板块,2026/1/1,2026/1/31,无,spider1.py,企业报告下载,自动探测板块并爬取,是',
-      'https://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice,巨潮咨询网-公告-深市,2026/2/11,2026/2/11,无,spider2.py,新闻报告下载,单一板块爬取,否',
-      'http://www.sse.com.cn/disclosure/listedinfo/announcement/,上海证券交易所-披露-上市公司公告,2026/1/1,2026/1/1,无,spider3.py,新闻舆情爬取,日期筛选类网站爬取,否'
+      '页面链接,页面名称,开始时间,结束时间,任务目标,支持图片（提交配置后在前端上传）,输出脚本名称,运行模式,是否下载报告',
+      '"https://www.ccxi.com.cn/creditrating/result",中诚信-信用评级-企业评级板块所有子板块,2026/1/1,2026/1/31,"爬取企业评级板块所有子板块的报告PDF，按日期范围筛选",无,spider1.py,企业报告下载,是',
+      '"https://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice",巨潮咨询网-公告-深市,,,爬取该页面url里展示的前5条新闻,无,spider2.py,新闻报告下载,否',
+      '"http://www.sse.com.cn/disclosure/listedinfo/announcement/",上海证券交易所-披露-上市公司公告,,,爬取该页面url里展示的前10条新闻公告,无,spider3.py,新闻舆情爬取,否'
     ].join('\n');
 
     const file = new File([`\uFEFF${csv}`], 'crawler_batch_template.csv', {
@@ -350,31 +321,58 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
       return;
     }
 
+    const headerCols = parseCsvLine(lines[0]);
+    const headerHasTaskObjective = headerCols.some((h) => h.includes('任务目标'));
+
     const parsedRows: BatchRow[] = [];
     for (let i = 1; i < lines.length; i += 1) {
       const cols = parseCsvLine(lines[i]);
       if (cols.length < 5) continue;
 
-      const hasSupportImageColumn = cols.length >= 9;
-      const scriptIndex = hasSupportImageColumn ? 5 : 4;
-      const runModeIndex = hasSupportImageColumn ? 6 : 5;
-      const crawlModeIndex = hasSupportImageColumn ? 7 : 6;
-      const downloadIndex = hasSupportImageColumn ? 8 : 7;
+      // 通过表头行检测模板格式
+      const hasTaskObjectiveCol = headerHasTaskObjective;
+      let taskObjective = '';
+      let imgOffset: number;
+      let scriptIdx: number;
+      let runModeIdx: number;
+      let downloadIdx: number;
 
-      const rawRunMode = (cols[runModeIndex] || '').trim();
-      const rawCrawlMode = (cols[crawlModeIndex] || '').trim();
-      const rawDownload = (cols[downloadIndex] || '').trim();
+      if (hasTaskObjectiveCol) {
+        // 新模板：页面链接,页面名称,开始时间,结束时间,任务目标,支持图片,输出脚本名称,运行模式,是否下载报告
+        taskObjective = (cols[4] || '').trim();
+        imgOffset = 5;
+        scriptIdx = 6;
+        runModeIdx = 7;
+        downloadIdx = 8;
+      } else if (cols.length >= 9) {
+        // 旧模板（含爬取模式列）：忽略爬取模式
+        imgOffset = 4;
+        scriptIdx = 5;
+        runModeIdx = 6;
+        downloadIdx = 8;
+      } else if (cols.length >= 8) {
+        // 旧模板（无爬取模式、无任务目标，含图片列）
+        imgOffset = 4;
+        scriptIdx = 5;
+        runModeIdx = 6;
+        downloadIdx = 7;
+      } else {
+        // 最简模板（无图片列）
+        imgOffset = -1;
+        scriptIdx = 4;
+        runModeIdx = 5;
+        downloadIdx = 6;
+      }
+
+      const rawRunMode = (cols[runModeIdx] || '').trim();
+      const rawDownload = (cols[downloadIdx] || '').trim();
 
       const runMode = normalizeRunMode(rawRunMode);
-      const crawlMode = normalizeCrawlMode(rawCrawlMode);
       const downloadReport = normalizeDownload(rawDownload);
 
       const importErrors: BatchRow['importErrors'] = {};
       if (!runMode) {
         importErrors.runMode = `值错误：应为 [${VALID_RUN_MODE_LABELS.join('、')}]`;
-      }
-      if (!crawlMode) {
-        importErrors.crawlMode = `值错误：应为 [${VALID_CRAWL_MODE_LABELS.join('、')}]`;
       }
       if (!downloadReport) {
         importErrors.downloadReport = `值错误：应为 [${VALID_DOWNLOAD_LABELS.join('、')}]`;
@@ -386,9 +384,9 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
         listPageName: (cols[1] || '').trim(),
         startDate: normalizeDate(cols[2] || ''),
         endDate: normalizeDate(cols[3] || ''),
-        outputScriptName: (cols[scriptIndex] || '').trim(),
+        taskObjective,
+        outputScriptName: (cols[scriptIdx] || '').trim(),
         runMode,
-        crawlMode,
         downloadReport,
         sourceCredibility: '',
         attachments: [],
@@ -438,14 +436,14 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
     const result: CrawlerFormData[] = validated.map((row) => ({
       startDate: row.startDate,
       endDate: row.endDate,
-      taskObjective: '',
+      taskObjective: row.taskObjective,
       siteName: '',
       listPageName: row.listPageName,
       sourceCredibility: row.sourceCredibility,
       reportUrl: row.reportUrl,
       outputScriptName: row.outputScriptName,
       runMode: row.runMode,
-      crawlMode: row.crawlMode,
+      crawlMode: 'agent',
       downloadReport: row.downloadReport,
       attachments: row.attachments
     }));
@@ -539,10 +537,10 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
                   <th className="px-2 py-3 w-64">页面名称 *</th>
                   <th className="px-2 py-3 w-40">开始时间 *</th>
                   <th className="px-2 py-3 w-40">结束时间 *</th>
+                  <th className="px-2 py-3 w-72">任务目标 *</th>
                   <th className="px-2 py-3 w-36">支持图片</th>
                   <th className="px-2 py-3 w-40">输出脚本名称 *</th>
                   <th className="px-2 py-3 w-44">运行模式 *</th>
-                  <th className="px-2 py-3 w-44">爬取模式 *</th>
                   <th className="px-2 py-3 w-36">是否下载报告 *</th>
                   <th className="px-2 py-3 w-14">操作</th>
                 </tr>
@@ -594,6 +592,17 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
                         className={`h-[42px] ${row.errors.endDate ? 'border-red-300' : ''}`}
                       />
                       {renderError(row.errors.endDate)}
+                    </td>
+
+                    <td className="px-2 py-3">
+                      <textarea
+                        value={row.taskObjective}
+                        onChange={(e) => updateRow(row.id, 'taskObjective', e.target.value)}
+                        className="w-full border border-gray-200 rounded-2xl px-3 py-2.5 resize-none text-sm"
+                        placeholder="要爬取什么、筛选规则、输出要求..."
+                        rows={2}
+                      />
+                      {renderError(row.errors.taskObjective)}
                     </td>
 
                     <td className="px-2 py-3">
@@ -674,22 +683,6 @@ const BatchConfigView: React.FC<BatchConfigViewProps> = ({ onBack, onSubmit }) =
                         ))}
                       </select>
                       {renderError(row.errors.runMode)}
-                    </td>
-
-                    <td className="px-2 py-3">
-                      <select
-                        value={row.crawlMode}
-                        onChange={(e) => updateRow(row.id, 'crawlMode', e.target.value)}
-                        className="w-full border border-gray-200 rounded-2xl px-3 py-2.5"
-                      >
-                        <option value="">请选择</option>
-                        {CRAWL_MODE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      {renderError(row.errors.crawlMode)}
                     </td>
 
                     <td className="px-2 py-3">

@@ -663,12 +663,14 @@ async def tool_get_site_menu_tree(ctx: ToolContext, max_depth: int = 3) -> ToolR
 
         data = {
             "leaf_count": len(leaf_paths),
-            "leaf_paths": leaf_paths[:30],
+            "leaf_paths": leaf_paths[:100],  # Increased limit to avoid missing categories
             "has_menu": len(leaf_paths) > 0,
+            "truncated": len(leaf_paths) > 100,
         }
         summary = f"Menu tree: {len(leaf_paths)} leaf nodes"
         if leaf_paths:
-            summary += f" (e.g. {leaf_paths[:3]})"
+            preview = ", ".join(leaf_paths[:3])
+            summary += f" (e.g. {preview}...)"
         ctx.log(f"[TOOL] {summary}")
         return ToolResult(success=True, data=data, summary=summary)
     except Exception as exc:

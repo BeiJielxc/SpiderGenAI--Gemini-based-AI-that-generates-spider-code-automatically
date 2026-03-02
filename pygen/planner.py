@@ -597,7 +597,10 @@ class AgentPlanner:
                     action_input = {}
 
                 self.log(f"[PLANNER] Thought: {str(thought)[:200]}")
-                self.log(f"[PLANNER] Action: {action}")
+                if action == "finish":
+                    self.log(f"[PLANNER] Action: finish and submit code to critic")
+                else:
+                    self.log(f"[PLANNER] Action: {action}")
 
                 self._messages.append({"role": "assistant", "content": llm_output})
 

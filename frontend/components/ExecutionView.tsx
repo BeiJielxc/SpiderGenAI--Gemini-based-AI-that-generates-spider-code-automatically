@@ -25,6 +25,7 @@ import {
   Users
 } from 'lucide-react';
 import { ProcessStep, StepStatus, CrawlerFormData, API_BASE_URL, TaskStatusResponse, GenerateRequest, ReportFile, NewsArticle, QueueInfo } from '../types';
+import { explainError } from '../utils/errorExplain';
 
 interface ExecutionViewProps {
   mode: string;
@@ -90,6 +91,14 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
   );
   const [resultFile, setResultFile] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const explainedError = useMemo(() => explainError(errorMsg), [errorMsg]);
+  const errorTitle = useMemo(() => {
+    const normalized = (errorMsg || '').toLowerCase();
+    if (normalized.includes('max iterations reached without generating code')) {
+      return '爬取失败';
+    }
+    return 'Agent执行出错（请根据下方给出的错误原因说明排查内部问题）';
+  }, [errorMsg]);
   const [newsArticles, setNewsArticles] = useState<NewsArticle[]>(initialNewsArticles || []);
   
   // Report List State
@@ -758,8 +767,11 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({
             <div className="mx-4 mt-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
               <AlertCircle size={20} className="text-red-500 shrink-0 mt-0.5" />
               <div>
-                <p className="font-medium text-red-700">执行出错</p>
-                <p className="text-sm text-red-600 mt-1">{errorMsg}</p>
+                <p className="font-medium text-red-700">{errorTitle}</p>
+                <p className="text-sm text-red-600 mt-1">错误原因：{explainedError.reason}</p>
+                {explainedError.explanation && (
+                  <p className="text-sm text-red-600 mt-1">原因说明：{explainedError.explanation}</p>
+                )}
               </div>
             </div>
           )}

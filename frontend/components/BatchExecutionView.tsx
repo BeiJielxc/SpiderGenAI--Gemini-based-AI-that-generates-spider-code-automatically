@@ -31,13 +31,6 @@ const RUN_MODE_LABELS: Record<string, string> = {
   news_sentiment: '新闻舆情爬取'
 };
 
-const CRAWL_MODE_LABELS: Record<string, string> = {
-  single_page: '单一板块爬取',
-  multi_page: '多板块爬取',
-  auto_detect: '自动探测板块并爬取',
-  date_range_api: '日期筛选类网站爬取'
-};
-
 const DOWNLOAD_LABELS: Record<string, string> = {
   yes: '是',
   no: '否'
@@ -442,7 +435,6 @@ const BatchExecutionView: React.FC<BatchExecutionViewProps> = ({
               <th className="px-4 py-3">脚本名</th>
               <th className="px-4 py-3">目标URL</th>
               <th className="px-4 py-3">运行模式</th>
-              <th className="px-4 py-3">爬取模式</th>
               <th className="px-4 py-3">下载</th>
               <th className="px-4 py-3">时间范围</th>
               <th className="px-4 py-3">状态</th>
@@ -459,9 +451,6 @@ const BatchExecutionView: React.FC<BatchExecutionViewProps> = ({
                 </td>
                 <td className="px-4 py-3 text-gray-600">
                   {RUN_MODE_LABELS[job.runMode] || job.runMode}
-                </td>
-                <td className="px-4 py-3 text-gray-600">
-                  {CRAWL_MODE_LABELS[job.crawlMode] || job.crawlMode}
                 </td>
                 <td className="px-4 py-3 text-gray-600">
                   {DOWNLOAD_LABELS[job.downloadReport] || job.downloadReport}

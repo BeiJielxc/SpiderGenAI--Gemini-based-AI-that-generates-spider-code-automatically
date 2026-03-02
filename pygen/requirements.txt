@@ -21,5 +21,5 @@ beautifulsoup4            # HTML 解析（pygen/llm_agent.py 等）
 # 可选依赖（美化输出）
 rich>=13.0.0              # 终端美化
 
-# 生成的爬虫脚本可能需要的依赖（供参考）
-# lxml>=4.9.0             # 快速XML/HTML解析器
+# 生成的爬虫脚本常用依赖（Docker 沙箱内也需要）
+lxml>=4.9.0               # 快速 XML/HTML 解析器（BeautifulSoup lxml 引擎）
