@@ -628,11 +628,11 @@ class RegisteredTool:
 
 | 技能/工具 | 说明 |
 |------|------|
-| `extract_list_and_pagination` | 自动发现列表项 + CSS 选择器 + 分页控件 + 日期范围 |
+| `extract_list_and_pagination` | 自动发现列表项/报告条数 + CSS 选择器 + 分页控件 + 日期范围 |
 | `capture_api_and_infer_params` | 动态 API 嗅探 + 参数归因（page/date/category） |
 | `turn_page_and_verify_change` | 翻页并验证内容确实变化 |
 | `probe_detail_page` | 在新标签页探测详情页正文容器 |
-| `verify_selector` | 在当前页面测试 CSS 选择器并返回匹配数与可见数 |
+| `verify_selector` | 给llm自查CSS选择器是否正确的工具（确保写出来的爬虫代码能抓到东西），返回匹配数与可见数 |
 
 #### 导航与策略技能/工具 (Navigation & Strategy Tools)
 
