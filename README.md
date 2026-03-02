@@ -620,6 +620,7 @@ class RegisteredTool:
 | `wait_for_network_idle` | 等待网络空闲 |
 | `detect_data_status` | 检测数据/空/加载/错误状态 |
 | `analyze_page` | 综合分析页面结构 |
+| `get_intercepted_apis` | 获取浏览器拦截器捕获的 API (Playwright route/intercept) |
 
 #### 高级工具 (High-Level Skills/Tools) — `pygen/high_level_tools.py`
 
@@ -631,6 +632,7 @@ class RegisteredTool:
 | `capture_api_and_infer_params` | 动态 API 嗅探 + 参数归因（page/date/category） |
 | `turn_page_and_verify_change` | 翻页并验证内容确实变化 |
 | `probe_detail_page` | 在新标签页探测详情页正文容器 |
+| `verify_selector` | 在当前页面测试 CSS 选择器并返回匹配数与可见数 |
 
 #### 导航与策略技能/工具 (Navigation & Strategy Tools)
 
@@ -640,7 +642,7 @@ class RegisteredTool:
 | `probe_navigation` | 点击菜单路径，捕获 API/筛选映射 |
 | `build_verified_category_mapping` | 构建验证后的分类参数映射 |
 | `smart_date_api_scan` | 四层渐进式日期 API 检测 |
-| `enhanced_page_analysis` | 浏览器原生增强分析 |
+| `enhanced_page_analysis` | 浏览器原生增强分析，聚合更多页面信号 |
 
 #### 生成与质量检测技能/工具 (Generation & Quality Tools)
 
